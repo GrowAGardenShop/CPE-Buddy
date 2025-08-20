@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Easy Paste Quiz Question Editor + PDF Module Drawer</title>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
+    import { getFirestore, collection, getDocs, addDoc, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
+    import { getStorage, ref, uploadBytes, getDownloadURL, listAll, deleteObject } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-storage.js";
+
+    // --- Firebase config ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyDh2B68G_kRSGk22Mko8HU3ztPKNgY1EEE",
+      authDomain: "cpe-buddy.firebaseapp.com",
+      projectId: "cpe-buddy",
+      storageBucket: "cpe-buddy.appspot.com",
+      messagingSenderId: "171132740113",
+      appId: "1:171132740113:web:861b870b8f900429fcc7b0",
+      measurementId: "G-PVQTEF4HHZ"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const storage = getStorage(app);
+
+    // --- Quiz Functions ---
+    let currentCollection = "computersystem_questions";
+    let currentSnapshot = [];
+
+    window.changeCollection = function(sel) {
+      currentCollection = sel.value;
+      window.loadQuestions();
+    };
+
+    window.loadQuestions = async function() {
+      const qDiv = document.getElementById('questions');
+      qDiv.innerHTML = "<i>Loading...</i>";
+      const colRef = collection(db, currentCollection);
+      const snapshot = await getDocs(colRef);
+      currentSnapshot = [];
+      qDiv.innerHTML = '';
+      if (snapshot.empty) {
+        qDiv.innerHTML = "<i>No questions yet.</i>";
+        return;
+      }
+      snapshot.forEach(docSnap => {
+        const q = docSnap.data();
+        const docId = docSnap.id;
+        currentSnapshot.push({ docId, ...q });
+        const el = document.createElement('div');
+        el.className = 'question-card';
+        el.innerHTML = `
+          <input type="checkbox" class="question-select" value="${docId}"/>
+          <div class="question-main"><b>Q:</b> ${q.question}</div>
+          <div class="options">
+            ${q.options.map((opt, i) => `
+              <div class="${q.correctAnswerIndex === i ? 'option correct' : 'option'}">
+                ${opt}
+                ${q.correctAnswerIndex === i ? '<span class="correct-badge">✔</span>' : ''}
+              </div>
+            `).join('')}
+          </div>
+        `;
+        qDiv.appendChild(el);
+      });
+    };
+
+    window.addQuestion = async function() {
+      const question = document.getElementById('questionInput').value.trim();
+      const options = [
+        document.getElementById('optionA').value.trim(),
+        document.getElementById('optionB').value.trim(),
+        document.getElementById('optionC').value.trim(),
+        document.getElementById('optionD').value.trim()
+      ];
+      const correct = parseInt(document.getElementById('correctInput').value);
+
+      if (!question || options.some(opt => !opt) || !(correct >= 0 && correct <= 3)) {
+        alert("Please fill out all fields and select the correct answer.");
+        return;
+      }
+
+      await addDoc(collection(db, currentCollection), {
+        question,
+        options,
+        correctAnswerIndex: correct
+      });
+      document.getElementById('questionInput').value = '';
+      document.getElementById('optionA').value = '';
+      document.getElementById('optionB').value = '';
+      document.getElementById('optionC').value = '';
+      document.getElementById('optionD').value = '';
+      document.getElementById('correctInput').value = '0';
+      window.loadQuestions();
+    };
+
+    window.pasteAndAdd = async function() {
+      const pasteVal = document.getElementById('pasteInput').value.trim();
+      const lines = pasteVal.split('\n').filter(l => l.trim());
+      let count = 0;
+      for (const line of lines) {
+        const parts = line.split('|').map(s => s.trim());
+        if (parts.length !== 6) continue;
+        const question = parts[0];
+        const options = [parts[1], parts[2], parts[3], parts[4]];
+        const correctAnswerIndex = parseInt(parts[5]);
+        if (!question || options.some(opt => !opt) || !(correctAnswerIndex >= 0 && correctAnswerIndex <= 3)) continue;
+        await addDoc(collection(db, currentCollection), {
+          question,
+          options,
+          correctAnswerIndex
+        });
+        count++;
+      }
+      document.getElementById('pasteInput').value = '';
+      window.loadQuestions();
+      alert(count + " questions added.");
+    };
+
+    window.deleteSelectedQuestions = async function() {
+      const checkboxes = document.querySelectorAll('.question-select:checked');
+      if (checkboxes.length === 0) {
+        alert('No questions selected.');
+        return;
+      }
+      if (!confirm(`Delete ${checkboxes.length} selected question(s)?`)) return;
+      for (let cb of checkboxes) {
+        await deleteDoc(doc(db, currentCollection, cb.value));
+      }
+      window.loadQuestions();
+    };
+
+    window.deleteAllQuestions = async function() {
+      if (!confirm("Are you sure you want to delete ALL questions in this module? This cannot be undone.")) return;
+      for (let q of currentSnapshot) {
+        await deleteDoc(doc(db, currentCollection, q.docId));
+      }
+      window.loadQuestions();
+    };
+
+    // --- PDF Module Functions ---
+    const moduleList = [
+      "Computer System",
+      "Data n Digital",
+      "Economics",
+      "Feedback",
+      "Computer-Aided"
+    ];
+    const periodList = ["Prelim", "Midterm", "Prefinals", "Finals"];
+
+    // Set selects on DOMContentLoaded
+    window.addEventListener('DOMContentLoaded', () => {
+      window.loadQuestions();
+      // Set module select options
+      const moduleSel = document.getElementById('pdfModuleSelect');
+      moduleSel.innerHTML = moduleList.map(m => `<option value="${m}">${m}</option>`).join('');
+      // Set period select options
+      const periodSel = document.getElementById('pdfPeriodSelect');
+      periodSel.innerHTML = periodList.map(p => `<option value="${p}">${p}</option>`).join('');
+      window.loadPdfModules();
+    });
+
+    window.uploadPdfModule = async function() {
+      const module = document.getElementById('pdfModuleSelect').value.replace(/ /g, "_");
+      const period = document.getElementById('pdfPeriodSelect').value;
+      const fileInput = document.getElementById('pdfFileInput');
+      if (!fileInput.files.length) {
+        alert("Select a PDF file first!");
+        return;
+      }
+      const file = fileInput.files[0];
+      const storageRef = ref(storage, `pdfs/${module}/${period}.pdf`);
+      try {
+        await uploadBytes(storageRef, file);
+        alert("PDF uploaded!");
+        fileInput.value = "";
+        window.loadPdfModules();
+      } catch (e) {
+        alert("PDF upload failed: " + e.message);
+      }
+    };
+
+    window.loadPdfModules = async function() {
+      const module = document.getElementById('pdfModuleSelect').value.replace(/ /g, "_");
+      const listDiv = document.getElementById('pdfModuleList');
+      listDiv.innerHTML = "<i>Loading...</i>";
+      const pdfsRef = ref(storage, `pdfs/${module}/`);
+      try {
+        const res = await listAll(pdfsRef);
+        if (!res.items.length) {
+          listDiv.innerHTML = "<i>No PDFs uploaded yet.</i>";
+          return;
+        }
+        listDiv.innerHTML = "";
+        for (const itemRef of res.items) {
+          const url = await getDownloadURL(itemRef);
+          const periodName = itemRef.name.replace(".pdf", "");
+          const pdfEl = document.createElement('div');
+          pdfEl.className = 'pdf-card';
+          pdfEl.innerHTML = `
+            <b>${periodName}</b>: 
+            <a href="${url}" target="_blank">View</a>
+            <button onclick="window.deletePdfModule('${module}', '${itemRef.name}')">Delete</button>
+          `;
+          listDiv.appendChild(pdfEl);
+        }
+      } catch (e) {
+        listDiv.innerHTML = "<i>Error loading PDFs: " + e.message + "</i>";
+      }
+    };
+
+    window.deletePdfModule = async function(module, filename) {
+      if (!confirm("Delete this PDF?")) return;
+      const pdfRef = ref(storage, `pdfs/${module}/${filename}`);
+      try {
+        await deleteObject(pdfRef);
+        alert("PDF deleted.");
+        window.loadPdfModules();
+      } catch (e) {
+        alert("Delete failed: " + e.message);
+      }
+    };
+  </script>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: #f3f6fa; margin: 0; }
+    .container { max-width: 700px; margin: 32px auto; background: #fff; border-radius: 8px; box-shadow: 0 2px 12px #b8c9e8; padding: 32px; }
+    h1 { text-align: center; color: #1976d2; }
+    .form-group { margin-bottom: 16px; }
+    label { font-weight: bold; display: block; margin-bottom: 4px; color: #333;}
+    input[type="text"], textarea, select { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #b8c9e8; margin-bottom: 8px; }
+    button { background: #1976d2; color: #fff; border: none; border-radius: 4px; padding: 8px 20px; cursor: pointer; font-size: 16px;}
+    button:hover { background: #1456a0; }
+    .question-card { background: #f8fbff; border-radius: 6px; box-shadow: 0 1px 4px #b8c9e8; margin-bottom: 18px; padding: 14px; display: flex; align-items: flex-start; gap: 8px;}
+    .question-main { font-size: 1.1em; color: #1976d2; margin-bottom: 10px; }
+    .options { }
+    .option { padding: 6px; border-radius: 4px; margin-bottom: 3px; background: #eef3fa; position: relative;}
+    .option.correct { background: #c5e1a5; color: #33691e; font-weight: bold;}
+    .correct-badge { background: #388e3c; color: #fff; border-radius: 50%; font-size: 12px; padding: 2px 5px; margin-left: 8px;}
+    .section-title { margin-top: 32px; font-size: 1.2em; color: #1976d2;}
+    #questions { margin-top: 28px;}
+    .small-tip { font-size: 0.93em; color: #666; margin-bottom: 8px;}
+    .action-bar { margin-bottom: 18px; display: flex; gap: 12px;}
+    .question-select { margin-top: 8px; margin-right: 8px; transform: scale(1.2);}
+    .pdf-card {
+      background: #f8fbff;
+      border-radius: 6px;
+      box-shadow: 0 1px 4px #b8c9e8;
+      margin-bottom: 10px;
+      padding: 8px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      font-size: 1em;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Quiz Question Editor</h1>
+    <div class="form-group">
+      <label for="collectionSelect">Select Quiz Module:</label>
+      <select id="collectionSelect" onchange="window.changeCollection(this)">
+        <option value="computersystem_questions">Computer System</option>
+        <option value="datandigital_questions">Data n Digital</option>
+        <option value="economics_questions">Economics</option>
+        <option value="feedback_questions">Feedback</option>
+        <option value="computeraided_questions">Computer-Aided</option>
+      </select>
+    </div>
+
+    <div class="section-title">Add Question (Manual)</div>
+    <div class="form-group">
+      <label for="questionInput">Question:</label>
+      <input type="text" id="questionInput" placeholder="Enter your question">
+    </div>
+    <div class="form-group">
+      <label>Options:</label>
+      <input type="text" id="optionA" placeholder="Option A">
+      <input type="text" id="optionB" placeholder="Option B">
+      <input type="text" id="optionC" placeholder="Option C">
+      <input type="text" id="optionD" placeholder="Option D">
+    </div>
+    <div class="form-group">
+      <label for="correctInput">Correct Answer (Choose 0=A, 1=B, 2=C, 3=D):</label>
+      <select id="correctInput">
+        <option value="0">A</option>
+        <option value="1">B</option>
+        <option value="2">C</option>
+        <option value="3">D</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <button onclick="window.addQuestion()">Add Question</button>
+    </div>
+
+    <div class="section-title">Paste Questions (Fast)</div>
+    <div class="small-tip">
+      Paste one or multiple lines:<br>
+      <b>Format:</b> <code>Question? | Option A | Option B | Option C | Option D | CorrectIndex</code><br>
+      <b>Example:</b> <br>
+      <code>
+        What is software testing? | A. Creating features | B. Detect defects | C. Design architecture | D. Automate deployment | 1<br>
+        Who performs Unit Testing? | A. Testers | B. Developers | C. End-users | D. DB admins | 1
+      </code>
+      <br>
+      <b>CorrectIndex:</b> 0 for A, 1 for B, 2 for C, 3 for D
+    </div>
+    <div class="form-group">
+      <textarea id="pasteInput" rows="5" placeholder="Paste questions here..."></textarea>
+      <button onclick="window.pasteAndAdd()">Paste & Add</button>
+    </div>
+
+    <div class="section-title">Questions in Database</div>
+    <div class="action-bar">
+      <button onclick="window.deleteSelectedQuestions()">Delete Selected</button>
+      <button onclick="window.deleteAllQuestions()">Delete ALL</button>
+    </div>
+    <div id="questions"></div>
+
+    <div class="section-title">PDF Modules</div>
+    <div class="form-group">
+      <label for="pdfModuleSelect">Select Module:</label>
+      <select id="pdfModuleSelect"></select>
+    </div>
+    <div class="form-group">
+      <label for="pdfPeriodSelect">Select Period:</label>
+      <select id="pdfPeriodSelect"></select>
+    </div>
+    <div class="form-group">
+      <input type="file" id="pdfFileInput" accept="application/pdf">
+      <button onclick="window.uploadPdfModule()">Upload PDF</button>
+    </div>
+    <div class="form-group">
+      <button onclick="window.loadPdfModules()">Refresh PDF List</button>
+    </div>
+    <div id="pdfModuleList"></div>
+  </div>
+</body>//
+</html>
