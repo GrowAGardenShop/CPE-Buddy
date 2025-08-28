@@ -217,33 +217,16 @@ function joinGameRoom(code, playerId, isHost) {
     renderRoomPlayers(gameRoomData.players || {});
     renderLeaderboardBar();
 
-    // --- GAME SCREEN TRANSITION LOGIC (supports both first start and play again) ---
+    // --- GAME SCREEN TRANSITION LOGIC (robust for start and play again) ---
     const player = gameRoomData.players[localPlayerId];
-    if (gameRoomData.started) {
-      // "First start": no finishedPlayers, playAgain empty, mpQIndex==0, winner==null
-      const isFirstStart =
-        (gameRoomData.finishedPlayers || []).length === 0 &&
-        player &&
-        player.mpQIndex === 0 &&
-        (gameRoomData.playAgain || []).length === 0 &&
-        gameRoomData.winner === null;
-      // "Play again": after game, playAgain emptied, mpQIndex==0, winner==null, not finished
-      const isPlayAgain =
-        typeof gameRoomData.lastGameStartTS !== "undefined" &&
-        player &&
-        player.mpQIndex === 0 &&
-        (gameRoomData.playAgain || []).length === 0 &&
-        gameRoomData.winner === null &&
-        !player.finished &&
-        !player.completed;
-      if ((isFirstStart || isPlayAgain)) {
-        localGameEnded = false;
-        playAgainClicked = false;
-        renderGameScreen();
-        renderBars();
-        setupGlobalTimer();
-        return;
-      }
+    if (gameRoomData.started && player && !player.finished && !player.completed) {
+      // If game started and player is not finished, always show gameplay screen.
+      localGameEnded = false;
+      playAgainClicked = false;
+      renderGameScreen();
+      renderBars();
+      setupGlobalTimer();
+      return;
     }
     // --- END GAME SCREEN TRANSITION LOGIC ---
 
