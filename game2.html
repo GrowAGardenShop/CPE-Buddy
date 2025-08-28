@@ -4,11 +4,9 @@
   <meta charset="UTF-8">
   <title>Climb The Hill - Multiplayer Quiz</title>
   <script type="module">
-    // --- Firebase Imports ---
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
     import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
 
-    // --- Firebase Config ---
     const firebaseConfig = {
       apiKey: "AIzaSyDh2B68G_kRSGk22Mko8HU3ztPKNgY1EEE",
       authDomain: "cpe-buddy.firebaseapp.com",
@@ -29,11 +27,11 @@
     let chatUnsub = null;
     let gameRoomData = null;
     let barMax = 20;
-    let mpQIndex = 0;
-    let wrongStreak = 0;
     let timerInterval = null;
     let endTime = 0;
     let gameEnded = false;
+    let playAgainClicked = false; // local state for button
+    let leaderboard = {}; // local only, always fetched from Firestore
 
     // --- Utility ---
     function randomCode() {
@@ -55,7 +53,6 @@
       show('multiLobby');
       document.getElementById('mpError').innerText = "";
     };
-
     window.onload = function() {
       show('mainMenu');
     };
@@ -77,8 +74,9 @@
         questions.push(q);
       });
       questions = chooseQuestions(questions, 30);
-      // Add server-side timestamp for endTime (now + 5 mins)
       endTime = Date.now() + 5 * 60 * 1000;
+      let leaderboardInit = {};
+      leaderboardInit[localPlayerId] = 0;
       await setDoc(doc(db, "climb_games", gameCode), {
         code: gameCode,
         host: localPlayerId,
@@ -87,6 +85,8 @@
         barMax,
         endTime,
         winner: null,
+        playAgain: [],
+        leaderboard: leaderboardInit,
         players: {
           [localPlayerId]: {
             name: playerName,
@@ -129,6 +129,8 @@
         return;
       }
       localPlayerId = randomCode() + Date.now();
+      let leaderboardPatch = data.leaderboard || {};
+      leaderboardPatch[localPlayerId] = leaderboardPatch[localPlayerId] || 0;
       await updateDoc(roomRef, {
         [`players.${localPlayerId}`]: {
           name: playerName,
@@ -137,7 +139,8 @@
           mpQIndex: 0,
           finished: false,
           score: 0
-        }
+        },
+        leaderboard: leaderboardPatch
       });
       joinGameRoom(code, localPlayerId, false);
     };
@@ -146,6 +149,7 @@
     function joinGameRoom(code, playerId, isHost) {
       gameCode = code;
       localPlayerId = playerId;
+      playAgainClicked = false;
       show('roomMenu');
       document.getElementById('roomCodeShow').innerText = "Room Code: " + code;
       document.getElementById('roomHostShow').innerText = isHost ? "(You are host)" : "";
@@ -159,11 +163,12 @@
           return;
         }
         gameRoomData = snap.data();
+        leaderboard = gameRoomData.leaderboard || {};
         renderRoomPlayers(gameRoomData.players || {});
         if (gameRoomData.started) {
           show('gamePlay');
           startGamePlay();
-          setupChat(gameCode); // Start chat only in game
+          setupChat(gameCode);
         }
       });
     }
@@ -208,12 +213,13 @@
 
     // --- GAMEPLAY ---
     function startGamePlay() {
-      // Get endTime from room and start timer
       endTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
       gameEnded = false;
+      playAgainClicked = false;
       setupGlobalTimer();
-      renderBars(); // Only draw bars once initially
+      renderBars();
       renderGameScreen();
+      renderLeaderboardBar();
     }
 
     // --- TIMER ---
@@ -255,12 +261,8 @@
 
     // --- GAME CENTER / QUESTIONS ---
     function renderGameScreen() {
-      // Don't redraw bars except at game start or on right answer
-      // Center: question
       const player = gameRoomData.players[localPlayerId];
-      // Find mpQIndex for this player (all players have their own)
-      mpQIndex = player.mpQIndex || 0;
-      wrongStreak = player.wrongStreak || 0;
+      let mpQIndex = player.mpQIndex || 0;
       let q = gameRoomData.questions[mpQIndex];
       if (!q) {
         showResults();
@@ -282,20 +284,26 @@
     }
 
     function showResults(msg = "Game Over!") {
-      // Stop timer
       clearInterval(timerInterval);
+      gameEnded = true;
+      renderLeaderboardBar();
       // Find winner (by bar) or if set
-      let winner = gameRoomData.winner;
-      if (!winner) {
+      let winnerId = null;
+      if (gameRoomData.winner) {
+        let nameToId = Object.entries(gameRoomData.players).find(([pid, p]) => p.name === gameRoomData.winner);
+        if (nameToId) winnerId = nameToId[0];
+      } else {
         let arr = Object.entries(gameRoomData.players).sort((a, b) => (b[1].bar||0)-(a[1].bar||0));
-        winner = arr[0][1].bar >= barMax ? arr[0][1].name : null;
+        winnerId = arr[0][0];
       }
       let players = gameRoomData.players;
       let html = `<div class="flag-trophy"></div>
         <h2>${msg}</h2>
-        ${winner ? `<div style="color:#FFD700;font-size:1.3em;font-weight:bold;">Winner: ${winner}</div>` : ""}
-        <div class="leaderboard">${renderLeaderboard(players)}</div>`;
+        ${winnerId ? `<div style="color:#FFD700;font-size:1.3em;font-weight:bold;">Winner: ${players[winnerId].name}</div>` : ""}
+        <div class="leaderboard">${renderLeaderboard(players)}</div>
+        <div id="playAgainZone"></div>`;
       document.getElementById('gameCenter').innerHTML = html;
+      setupPlayAgainButton(winnerId);
     }
 
     function renderLeaderboard(players) {
@@ -303,19 +311,101 @@
       return arr.map(p => `<div>${p.name}: <b>${p.bar} / ${barMax}</b></div>`).join('');
     }
 
+    function renderLeaderboardBar() {
+      // Top leaderboard for wins
+      let playerMap = gameRoomData.players;
+      let leaderboardObj = gameRoomData.leaderboard || {};
+      // Display player names + #wins, sorted
+      let arr = Object.entries(leaderboardObj)
+        .map(([pid, wins]) => ({
+          name: playerMap[pid]?.name || "Player",
+          wins: wins
+        }))
+        .sort((a, b) => b.wins - a.wins);
+      let html = arr.map(p => `<span style="color:#FFD700;font-weight:bold;">${p.name}: ${p.wins}🏆</span>`).join(' &nbsp;|&nbsp; ');
+      document.getElementById('leaderboardBar').innerHTML = html || "";
+    }
+
+    // --- PLAY AGAIN LOGIC ---
+    function setupPlayAgainButton(winnerId) {
+      // In result page, show button and display X/Y
+      let playAgainArr = gameRoomData.playAgain || [];
+      let totalPlayers = Object.keys(gameRoomData.players).length;
+      let alreadyClicked = playAgainArr.includes(localPlayerId);
+      let btnText = alreadyClicked ? `Waiting (${playAgainArr.length}/${totalPlayers})` : `Play Again (${playAgainArr.length}/${totalPlayers})`;
+      let disableBtn = alreadyClicked;
+      let btnHtml = `
+      <button onclick="window.playAgainClick()" ${disableBtn ? "disabled" : ""}>${btnText}</button>
+      `;
+      document.getElementById('playAgainZone').innerHTML = btnHtml;
+      if (playAgainArr.length === totalPlayers) {
+        // All ready, restart!
+        setTimeout(() => restartGame(winnerId), 1000);
+      }
+    }
+
+    window.playAgainClick = async function() {
+      if (playAgainClicked) return;
+      playAgainClicked = true;
+      // Add self to playAgain array in Firestore
+      const roomRef = doc(db, "climb_games", gameCode);
+      const snap = await getDoc(roomRef);
+      let arr = snap.data().playAgain || [];
+      if (!arr.includes(localPlayerId)) arr.push(localPlayerId);
+      await updateDoc(roomRef, { playAgain: arr });
+    };
+
+    // --- GAME RESTART, RESET STUFF, NEW QUESTIONS ---
+    async function restartGame(winnerId) {
+      // Only host does restart
+      if (localPlayerId !== gameRoomData.host) return;
+      // Update leaderboard for winner
+      let leaderboardObj = {...(gameRoomData.leaderboard || {})};
+      if (winnerId) leaderboardObj[winnerId] = (leaderboardObj[winnerId] || 0) + 1;
+      // New question set
+      const colRef = collection(db, "computersystem_questions");
+      const snapshot = await getDocs(colRef);
+      let questions = [];
+      snapshot.forEach(docSnap => {
+        const q = docSnap.data();
+        questions.push(q);
+      });
+      questions = chooseQuestions(questions, 30);
+      let playersPatch = {};
+      Object.entries(gameRoomData.players).forEach(([pid, p]) => {
+        playersPatch[pid] = {
+          ...p,
+          bar: 0,
+          wrongStreak: 0,
+          mpQIndex: 0,
+          finished: false,
+          ready: false
+        };
+      });
+      await updateDoc(doc(db, "climb_games", gameCode), {
+        questions,
+        playAgain: [],
+        started: true,
+        endTime: Date.now() + 5 * 60 * 1000,
+        winner: null,
+        leaderboard: leaderboardObj,
+        players: playersPatch
+      });
+    }
+
+    // --- ANSWERING ---
     window.answerMp = async function(idx) {
-      // Prevent answers after game over
       if (gameEnded) return;
-      // Only update your own state
       let roomRef = doc(db, "climb_games", gameCode);
       let player = gameRoomData.players[localPlayerId];
-      let q = gameRoomData.questions[player.mpQIndex];
+      let mpQIndex = player.mpQIndex || 0;
+      let q = gameRoomData.questions[mpQIndex];
       if (!q) return;
       let correct = idx === q.correctAnswerIndex;
       let updates = {};
       let newBar = player.bar || 0;
       let newWrongStreak = player.wrongStreak || 0;
-      let nextQIndex = (player.mpQIndex || 0) + 1;
+      let nextQIndex = mpQIndex + 1;
       if (correct) {
         newBar = Math.min(newBar + 1, barMax);
         newWrongStreak = 0;
@@ -329,37 +419,18 @@
       updates[`players.${localPlayerId}.bar`] = newBar;
       updates[`players.${localPlayerId}.wrongStreak`] = newWrongStreak;
       updates[`players.${localPlayerId}.mpQIndex`] = nextQIndex;
-      // End game if bar is maxed for anyone
       let winnerName = null;
       if (correct && newBar >= barMax && !gameRoomData.winner) winnerName = player.name;
       if (winnerName) {
         updates["winner"] = winnerName;
       }
       await updateDoc(roomRef, updates);
-
-      // Only update bars for all if correct and bar changed
-      if (correct) {
-        // Wait for onSnapshot to update gameRoomData, then redraw bars and center
-        // But for instant UX, do it here for yourself
-        let localPlayers = {...gameRoomData.players};
-        localPlayers[localPlayerId] = {
-          ...localPlayers[localPlayerId],
-          bar: newBar,
-          wrongStreak: newWrongStreak,
-          mpQIndex: nextQIndex
-        };
-        renderBars();
-      }
-      // Always refresh center for yourself
-      // (wait a bit to ensure Firestore sync)
+      if (correct) renderBars();
       setTimeout(() => {
-        // If winner set, show results for everyone!
         if (winnerName || (gameRoomData && gameRoomData.winner)) {
           gameEnded = true;
           showResults("We have a winner!");
         } else {
-          // Only the center area
-          // Get latest player state
           gameRoomData.players[localPlayerId].bar = newBar;
           gameRoomData.players[localPlayerId].wrongStreak = newWrongStreak;
           gameRoomData.players[localPlayerId].mpQIndex = nextQIndex;
@@ -410,6 +481,7 @@
     #roomCodeShow { font-size:1.3em; margin-bottom:12px;}
     #mpError { color:#FFD700; margin-bottom:12px;}
     #roomStartBtn:disabled { opacity:0.5; pointer-events:none;}
+    #leaderboardBar { width:100%; background:rgba(30,30,60,0.8); border-radius:10px; margin-bottom:16px; padding:8px 0; text-align:center;}
     /* Game Layout */
     #gamePlay { display:flex; flex-direction:row; gap:24px; min-height:700px; }
     .bars-side { width:200px; background:rgba(40,30,60,0.8); border-radius:16px; padding:18px; min-height:600px; box-shadow:0 2px 16px #0005;}
@@ -443,6 +515,7 @@
 </head>
 <body>
   <div class="container">
+    <div id="leaderboardBar"></div>
     <!-- MAIN MENU -->
     <div class="page" id="mainMenu" style="flex-direction:column;align-items:center;">
       <h1>Climb The Hill</h1>
