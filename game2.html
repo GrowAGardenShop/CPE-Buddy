@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <title>Climb The Hill - Multiplayer Quiz</title>
   <script type="module">
-    // --- Firebase Imports ---
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
     import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy, deleteField } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
 
@@ -31,13 +30,14 @@
     let gameRoomData = null;
     let barMax = 20;
     let timerInterval = null;
-    let endTime = 0;
-    let gameEnded = false;
+    let serverEndTime = 0;
+    let localGameEnded = false;
     let playAgainClicked = false;
-    let leaderboard = {};
     let lastBarSnapshot = {};
     let kickedFlag = false;
-    let joinLock = false; // prevent join spam
+    let joinLock = false;
+    let leaderboardOrder = [];
+    let lastGameStartTS = 0; // for timer sync
 
     // --- Utility ---
     function randomCode() {
@@ -52,7 +52,7 @@
       document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
       document.getElementById(pageId).style.display = 'flex';
     }
-    window.show = show; // for inline HTML onclick
+    window.show = show;
 
     // --- Main Menu ---
     window.gotoMultiplayer = function() {
@@ -106,19 +106,21 @@
         questions.push(q);
       });
       questions = chooseQuestions(questions, 30);
-      endTime = Date.now() + 5 * 60 * 1000;
-      let leaderboardInit = {};
-      leaderboardInit[localPlayerId] = 0;
+      // Set end time as server timestamp + 5 min
+      serverEndTime = Date.now() + 5*60*1000;
+      lastGameStartTS = serverEndTime - 5*60*1000;
+      leaderboardOrder = [localPlayerId];
       await setDoc(doc(db, "climb_games", gameCode), {
         code: gameCode,
         host: localPlayerId,
         started: false,
         questions,
         barMax,
-        endTime,
+        endTime: serverEndTime,
         winner: null,
         playAgain: [],
-        leaderboard: leaderboardInit,
+        leaderboard: { [localPlayerId]: 0 },
+        leaderboardOrder: leaderboardOrder,
         players: {
           [localPlayerId]: {
             name: playerName,
@@ -126,14 +128,15 @@
             wrongStreak: 0,
             mpQIndex: 0,
             finished: false,
-            score: 0
+            completed: false
           }
-        }
+        },
+        lastGameStartTS
       });
       joinGameRoom(gameCode, localPlayerId, true);
     };
 
-    // --- Join Game Room: Prevent join spam, only 1 join allowed per user ---
+    // --- Join Game Room
     window.joinGameRoomBtn = async function() {
       if (joinLock) return;
       joinLock = true;
@@ -163,7 +166,7 @@
           document.getElementById('mpError').innerText = "Room is full!";
           joinLock = false; return;
         }
-        // Check if player with the same name already exists in the room, prevent duplicate join
+        // No duplicate name
         let duplicate = Object.values(data.players || {}).some(p => p.name === playerName);
         if (duplicate) {
           document.getElementById('mpError').innerText = "This name already joined!";
@@ -172,6 +175,8 @@
         localPlayerId = randomCode() + Date.now();
         let leaderboardPatch = data.leaderboard || {};
         leaderboardPatch[localPlayerId] = leaderboardPatch[localPlayerId] || 0;
+        let leaderboardOrderPatch = data.leaderboardOrder || [];
+        leaderboardOrderPatch.push(localPlayerId);
         await updateDoc(roomRef, {
           [`players.${localPlayerId}`]: {
             name: playerName,
@@ -179,13 +184,14 @@
             wrongStreak: 0,
             mpQIndex: 0,
             finished: false,
-            score: 0
+            completed: false
           },
-          leaderboard: leaderboardPatch
+          leaderboard: leaderboardPatch,
+          leaderboardOrder: leaderboardOrderPatch
         });
         joinGameRoom(code, localPlayerId, false);
       } finally {
-        setTimeout(() => { joinLock = false; }, 1500); // Slow join (prevent spam)
+        setTimeout(() => { joinLock = false; }, 1500);
       }
     };
 
@@ -209,8 +215,9 @@
           return;
         }
         gameRoomData = snap.data();
-        leaderboard = gameRoomData.leaderboard || {};
-        // Check if we've been kicked
+        // Stable leaderboard order
+        leaderboardOrder = gameRoomData.leaderboardOrder || Object.keys(gameRoomData.leaderboard || {});
+        // Kicked check
         if (!gameRoomData.players[localPlayerId] && !kickedFlag && !gameRoomData.started) {
           kickedFlag = true;
           alert("You have been kicked from the room.");
@@ -218,6 +225,7 @@
           return;
         }
         renderRoomPlayers(gameRoomData.players || {});
+        renderLeaderboardBar();
         if (gameRoomData.started) {
           show('gamePlay');
           if (lobbyChatUnsub) lobbyChatUnsub();
@@ -255,6 +263,8 @@
       const roomRef = doc(db, "climb_games", gameCode);
       let patch = {};
       patch[`players.${pid}`] = deleteField();
+      let leaderboardOrder = gameRoomData.leaderboardOrder || [];
+      patch["leaderboardOrder"] = leaderboardOrder.filter(id => id !== pid);
       await updateDoc(roomRef, patch);
     };
 
@@ -267,19 +277,23 @@
 
     window.startGameRoom = async function() {
       const roomRef = doc(db, "climb_games", gameCode);
+      const newEnd = Date.now() + 5*60*1000;
       await updateDoc(roomRef, {
-        started: true
+        started: true,
+        endTime: newEnd,
+        lastGameStartTS: Date.now()
       });
     };
 
     window.leaveRoom = function() {
       if (gameRoomUnsub) gameRoomUnsub();
       if (lobbyChatUnsub) lobbyChatUnsub();
-      // Remove self from players in room
       if (gameCode && localPlayerId) {
         const roomRef = doc(db, "climb_games", gameCode);
         let patch = {};
         patch[`players.${localPlayerId}`] = deleteField();
+        let leaderboardOrder = gameRoomData && gameRoomData.leaderboardOrder ? gameRoomData.leaderboardOrder : [];
+        patch["leaderboardOrder"] = leaderboardOrder.filter(id => id !== localPlayerId);
         updateDoc(roomRef, patch);
       }
       show('mainMenu');
@@ -287,14 +301,15 @@
 
     // --- GAMEPLAY ---
     function startGamePlay() {
-      endTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
-      gameEnded = false;
+      // Use host's serverEndTime for timer
+      serverEndTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
+      localGameEnded = false;
       playAgainClicked = false;
       lastBarSnapshot = {};
+      renderLeaderboardBar();
       setupGlobalTimer();
       renderBars();
       renderGameScreen();
-      renderLeaderboardBar();
     }
 
     // --- TIMER ---
@@ -304,25 +319,24 @@
       timerInterval = setInterval(updateTimer, 1000);
     }
     function updateTimer() {
-      const now = Date.now();
-      let secs = Math.max(0, Math.floor((endTime-now)/1000));
+      let now = Date.now();
+      let secs = Math.max(0, Math.floor((serverEndTime-now)/1000));
       const min = String(Math.floor(secs/60)).padStart(2,"0");
       const s = String(secs%60).padStart(2,"0");
       document.getElementById('globalTimer').innerText = `${min}:${s}`;
-      if (secs <= 0 && !gameEnded) {
-        gameEnded = true;
+      if (secs <= 0 && !localGameEnded) {
+        localGameEnded = true;
         showResults("Time's up! Here are the scores:");
       }
     }
 
-    // --- BAR DRAW (only refresh if bar actually changes) ---
+    // --- BAR DRAW (only refresh if bar actually changes, leaderboard order stable) ---
     function renderBars() {
       const players = gameRoomData.players;
       let barVals = {};
       Object.entries(players).forEach(([pid, p]) => {
         barVals[pid] = p.bar || 0;
       });
-      // Only redraw if bars actually changed
       let changed = false;
       for (let pid in barVals) {
         if (lastBarSnapshot[pid] !== barVals[pid]) { changed = true; break; }
@@ -330,7 +344,9 @@
       if (!changed) return;
       lastBarSnapshot = {...barVals};
       let barsHtml = "";
-      Object.entries(players).sort((a,b) => (b[1].bar||0)-(a[1].bar||0)).forEach(([pid, p]) => {
+      leaderboardOrder.forEach(pid => {
+        const p = players[pid];
+        if (!p) return;
         let width = Math.round((p.bar/barMax)*100);
         let color = pid === localPlayerId ? "#FFD700" : "#2196f3";
         barsHtml += `
@@ -348,6 +364,10 @@
     // --- GAME CENTER / QUESTIONS ---
     function renderGameScreen() {
       const player = gameRoomData.players[localPlayerId];
+      if (player.completed || player.finished) {
+        renderCompletedScreen();
+        return;
+      }
       let mpQIndex = player.mpQIndex || 0;
       let q = gameRoomData.questions[mpQIndex];
       if (!q) {
@@ -369,17 +389,28 @@
       document.getElementById('gameCenter').innerHTML = questionHtml;
     }
 
+    function renderCompletedScreen() {
+      document.getElementById('gameCenter').innerHTML = `
+        <div style="font-size:2em;color:#FFD700;margin-bottom:20px;">🎉 You finished!</div>
+        <div>Waiting for others to finish...</div>
+      `;
+    }
+
     function showResults(msg = "Game Over!") {
       clearInterval(timerInterval);
-      gameEnded = true;
+      localGameEnded = true;
       renderLeaderboardBar();
+      // Winner is by bar or set
       let winnerId = null;
       if (gameRoomData.winner) {
         let nameToId = Object.entries(gameRoomData.players).find(([pid, p]) => p.name === gameRoomData.winner);
         if (nameToId) winnerId = nameToId[0];
       } else {
-        let arr = Object.entries(gameRoomData.players).sort((a, b) => (b[1].bar||0)-(a[1].bar||0));
-        winnerId = arr[0][0];
+        let arr = leaderboardOrder
+          .map(pid => [pid, gameRoomData.players[pid]])
+          .filter(([pid,p]) => p)
+          .sort((a, b) => (b[1].bar||0)-(a[1].bar||0));
+        winnerId = arr.length ? arr[0][0] : null;
       }
       let players = gameRoomData.players;
       let html = `<div class="flag-trophy"></div>
@@ -392,19 +423,21 @@
     }
 
     function renderLeaderboard(players) {
-      let arr = Object.values(players).sort((a,b) => (b.bar||0)-(a.bar||0));
-      return arr.map(p => `<div>${p.name}: <b>${p.bar} / ${barMax}</b></div>`).join('');
+      return leaderboardOrder
+        .map(pid => players[pid])
+        .filter(p => p)
+        .map(p => `<div>${p.name}: <b>${p.bar} / ${barMax}</b></div>`)
+        .join('');
     }
 
     function renderLeaderboardBar() {
       let playerMap = gameRoomData.players;
       let leaderboardObj = gameRoomData.leaderboard || {};
-      let arr = Object.entries(leaderboardObj)
-        .map(([pid, wins]) => ({
+      let arr = leaderboardOrder
+        .map(pid => ({
           name: playerMap[pid]?.name || "Player",
-          wins: wins
-        }))
-        .sort((a, b) => b.wins - a.wins);
+          wins: leaderboardObj[pid] || 0
+        }));
       let html = arr.map(p => `<span style="color:#FFD700;font-weight:bold;">${p.name}: ${p.wins}🏆</span>`).join(' &nbsp;|&nbsp; ');
       document.getElementById('leaderboardBar').innerHTML = html || "";
     }
@@ -412,7 +445,8 @@
     // --- PLAY AGAIN LOGIC ---
     function setupPlayAgainButton(winnerId) {
       let playAgainArr = gameRoomData.playAgain || [];
-      let totalPlayers = Object.keys(gameRoomData.players).length;
+      // Only current players
+      let totalPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]).length;
       let alreadyClicked = playAgainArr.includes(localPlayerId);
       let btnText = alreadyClicked ? `Waiting (${playAgainArr.length}/${totalPlayers})` : `Play Again (${playAgainArr.length}/${totalPlayers})`;
       let disableBtn = alreadyClicked;
@@ -420,8 +454,8 @@
       <button onclick="window.playAgainClick()" ${disableBtn ? "disabled" : ""}>${btnText}</button>
       `;
       document.getElementById('playAgainZone').innerHTML = btnHtml;
-      if (playAgainArr.length === totalPlayers) {
-        setTimeout(() => restartGame(winnerId), 1000);
+      if (playAgainArr.length === totalPlayers && totalPlayers > 0) {
+        setTimeout(() => restartGame(winnerId), 900);
       }
     }
 
@@ -449,21 +483,27 @@
       });
       questions = chooseQuestions(questions, 30);
       let playersPatch = {};
-      Object.entries(gameRoomData.players).forEach(([pid, p]) => {
-        playersPatch[pid] = {
-          ...p,
-          bar: 0,
-          wrongStreak: 0,
-          mpQIndex: 0,
-          finished: false,
-          ready: false
-        };
+      leaderboardOrder.forEach(pid => {
+        let p = gameRoomData.players[pid];
+        if (p) {
+          playersPatch[pid] = {
+            ...p,
+            bar: 0,
+            wrongStreak: 0,
+            mpQIndex: 0,
+            finished: false,
+            completed: false,
+            ready: false
+          };
+        }
       });
+      const newEnd = Date.now() + 5*60*1000;
       await updateDoc(doc(db, "climb_games", gameCode), {
         questions,
         playAgain: [],
         started: true,
-        endTime: Date.now() + 5 * 60 * 1000,
+        endTime: newEnd,
+        lastGameStartTS: Date.now(),
         winner: null,
         leaderboard: leaderboardObj,
         players: playersPatch
@@ -472,9 +512,10 @@
 
     // --- ANSWERING ---
     window.answerMp = async function(idx) {
-      if (gameEnded) return;
+      if (localGameEnded) return;
       let roomRef = doc(db, "climb_games", gameCode);
       let player = gameRoomData.players[localPlayerId];
+      if (player.completed || player.finished) return;
       let mpQIndex = player.mpQIndex || 0;
       let q = gameRoomData.questions[mpQIndex];
       if (!q) return;
@@ -483,6 +524,7 @@
       let newBar = player.bar || 0;
       let newWrongStreak = player.wrongStreak || 0;
       let nextQIndex = mpQIndex + 1;
+      let completed = false;
       if (correct) {
         newBar = Math.min(newBar + 1, barMax);
         newWrongStreak = 0;
@@ -493,20 +535,26 @@
           newWrongStreak = 0;
         }
       }
+      // If player maxed bar, they are done
+      if (newBar >= barMax) {
+        completed = true;
+        updates[`players.${localPlayerId}.completed`] = true;
+        updates["winner"] = player.name;
+      }
+      // If no more questions, finished (cannot answer more)
+      if (nextQIndex >= gameRoomData.questions.length) {
+        completed = true;
+        updates[`players.${localPlayerId}.finished`] = true;
+      }
       updates[`players.${localPlayerId}.bar`] = newBar;
       updates[`players.${localPlayerId}.wrongStreak`] = newWrongStreak;
       updates[`players.${localPlayerId}.mpQIndex`] = nextQIndex;
-      let winnerName = null;
-      if (correct && newBar >= barMax && !gameRoomData.winner) winnerName = player.name;
-      if (winnerName) {
-        updates["winner"] = winnerName;
-      }
       await updateDoc(roomRef, updates);
       if (correct) renderBars();
       setTimeout(() => {
-        if (winnerName || (gameRoomData && gameRoomData.winner)) {
-          gameEnded = true;
-          showResults("We have a winner!");
+        // If completed, show completed screen. Otherwise, next question.
+        if (completed) {
+          renderCompletedScreen();
         } else {
           gameRoomData.players[localPlayerId].bar = newBar;
           gameRoomData.players[localPlayerId].wrongStreak = newWrongStreak;
@@ -559,7 +607,6 @@
     #mpError { color:#FFD700; margin-bottom:12px;}
     #roomStartBtn:disabled { opacity:0.5; pointer-events:none;}
     #leaderboardBar { width:100%; background:rgba(30,30,60,0.8); border-radius:10px; margin-bottom:16px; padding:8px 0; text-align:center;}
-    /* Game Layout */
     #gamePlay { display:flex; flex-direction:row; gap:24px; min-height:700px; }
     .bars-side { width:200px; background:rgba(40,30,60,0.8); border-radius:16px; padding:18px; min-height:600px; box-shadow:0 2px 16px #0005;}
     .player-bar { margin-bottom:18px; }
@@ -576,13 +623,11 @@
     .hill { position:absolute; left:0; top:50px; width:220px; height:32px; background:linear-gradient(90deg,#1e293b,#3B82F6 60%,#FFD700 100%); border-radius:22px 22px 55px 22px;}
     .flag-trophy { width:100px; height:100px; background:url('https://img.icons8.com/color/96/trophy.png') no-repeat center/contain; margin:0 auto 18px auto;}
     .leaderboard { color:#fff; font-size:1.18em; background:rgba(34,34,54,0.7); border-radius:8px; padding:12px;}
-    /* Chat Side */
     .chat-side { width:260px; background:rgba(40,30,60,0.8); border-radius:16px; min-height:600px; box-shadow:0 2px 16px #0005; display:flex; flex-direction:column;}
     .chat-header { color:#FFD700; font-weight:bold; font-size:1.2em; margin-bottom:8px; text-align:center;}
     #chatDisplay, #lobbyChatDisplay { flex:1; overflow-y:auto; max-height:420px; margin-bottom:10px; padding:8px 0;}
     .chat-msg { color:#fff; margin-bottom:7px; }
     #chatInput, #lobbyChatInput { width:88%; margin-right:2%; background:#222; color:#FFD700; border:none; border-radius:8px; padding:8px;}
-    /* Responsive */
     @media (max-width:900px) {
       #gamePlay { flex-direction:column; align-items:center;}
       .bars-side, .chat-side { width:90vw; min-height:180px; margin-bottom:18px;}
