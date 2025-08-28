@@ -162,7 +162,7 @@
           document.getElementById('mpError').innerText = "Game already started!";
           joinLock = false; return;
         }
-        if (data.players && Object.keys(data.players).length >= 5) {
+        if (data.players && Object.keys(data.players).length >= 6) {
           document.getElementById('mpError').innerText = "Room is full!";
           joinLock = false; return;
         }
