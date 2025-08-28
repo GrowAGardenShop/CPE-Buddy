@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Quiz Game - Play with Friends!</title>
+  <script type="module">
+    // --- Firebase Imports ---
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
+    import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
+
+    // --- Firebase Config ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyDh2B68G_kRSGk22Mko8HU3ztPKNgY1EEE",
+      authDomain: "cpe-buddy.firebaseapp.com",
+      projectId: "cpe-buddy",
+      storageBucket: "cpe-buddy.appspot.com",
+      messagingSenderId: "171132740113",
+      appId: "1:171132740113:web:861b870b8f900429fcc7b0",
+      measurementId: "G-PVQTEF4HHZ"
+    };
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // --- Globals ---
+    let playerName = "";
+    let gameCode = "";
+    let localPlayerId = "";
+    let gameRoomUnsub = null;
+    let gameRoomData = null;
+    let questionSet = [];
+    let currentQuestionIndex = 0;
+    let countdownInterval = null;
+    let timeLeft = 30;
+
+    // --- Utility ---
+    function randomCode() {
+      return Math.random().toString(36).substring(2,8).toUpperCase();
+    }
+
+    function chooseQuestions(arr, n) {
+      if (arr.length <= n) return arr;
+      const shuffled = arr.slice().sort(() => Math.random() - 0.5);
+      return shuffled.slice(0, n);
+    }
+
+    // --- Main Navigation ---
+    function show(pageId) {
+      document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+      document.getElementById(pageId).style.display = 'block';
+    }
+
+    window.onload = function() {
+      show('mainMenu');
+    };
+
+    // --- Single Player ---
+    async function startSinglePlayer() {
+      show('singlePlayer');
+      document.getElementById('singleResult').innerHTML = "";
+      // Load questions from database (default: computersystem_questions)
+      const colRef = collection(db, "computersystem_questions");
+      const snapshot = await getDocs(colRef);
+      questionSet = [];
+      snapshot.forEach(docSnap => {
+        const q = docSnap.data();
+        questionSet.push(q);
+      });
+      questionSet = chooseQuestions(questionSet, 10);
+      currentQuestionIndex = 0;
+      renderSingleQuestion();
+    }
+
+    function renderSingleQuestion() {
+      if (currentQuestionIndex >= questionSet.length) {
+        document.getElementById('singleQuestionZone').innerHTML = "<b>Quiz Done!</b>";
+        document.getElementById('singleResult').innerHTML = `Score: ${window.singleScore || 0} / ${questionSet.length}`;
+        return;
+      }
+      window.singleScore = window.singleScore || 0;
+      const q = questionSet[currentQuestionIndex];
+      let optionsHtml = q.options.map((opt, i) =>
+        `<button class="spOptBtn" onclick="window.answerSingle(${i})">${opt}</button>`
+      ).join('<br>');
+      document.getElementById('singleQuestionZone').innerHTML = `
+        <div class="spTimer" id="singleTimer">30</div>
+        <div class="spQ"><b>Q${currentQuestionIndex+1}:</b> ${q.question}</div>
+        <div class="spOpts">${optionsHtml}</div>
+      `;
+      timeLeft = 30;
+      document.getElementById('singleTimer').innerText = timeLeft;
+      if (countdownInterval) clearInterval(countdownInterval);
+      countdownInterval = setInterval(() => {
+        timeLeft--;
+        document.getElementById('singleTimer').innerText = timeLeft;
+        if (timeLeft <= 0) {
+          clearInterval(countdownInterval);
+          window.answerSingle(-1);
+        }
+      }, 1000);
+    }
+
+    window.answerSingle = function(idx) {
+      clearInterval(countdownInterval);
+      const q = questionSet[currentQuestionIndex];
+      if (idx === q.correctAnswerIndex) window.singleScore++;
+      currentQuestionIndex++;
+      renderSingleQuestion();
+    };
+
+    // --- Multiplayer Lobby ---
+    window.gotoMultiplayer = function() {
+      show('multiLobby');
+      document.getElementById('mpError').innerText = "";
+    };
+
+    // --- Create Game Room ---
+    window.createGameRoom = async function() {
+      playerName = document.getElementById('mpName').value.trim();
+      if (!playerName) {
+        document.getElementById('mpError').innerText = "Enter your name!";
+        return;
+      }
+      gameCode = randomCode();
+      localPlayerId = randomCode() + Date.now();
+      // Pick questions
+      const colRef = collection(db, "computersystem_questions");
+      const snapshot = await getDocs(colRef);
+      let questions = [];
+      snapshot.forEach(docSnap => {
+        const q = docSnap.data();
+        questions.push(q);
+      });
+      questions = chooseQuestions(questions, 10);
+
+      // Create game room
+      await setDoc(doc(db, "quiz_games", gameCode), {
+        code: gameCode,
+        host: localPlayerId,
+        started: false,
+        questions,
+        players: {
+          [localPlayerId]: {
+            name: playerName,
+            score: 0,
+            ready: false,
+            answer: null
+          }
+        }
+      });
+      joinGameRoom(gameCode, localPlayerId, true);
+    };
+
+    // --- Join Game Room ---
+    window.joinGameRoomBtn = async function() {
+      playerName = document.getElementById('mpName').value.trim();
+      if (!playerName) {
+        document.getElementById('mpError').innerText = "Enter your name!";
+        return;
+      }
+      const code = document.getElementById('mpCode').value.trim().toUpperCase();
+      if (!code) {
+        document.getElementById('mpError').innerText = "Enter code!";
+        return;
+      }
+      const roomRef = doc(db, "quiz_games", code);
+      const roomSnap = await getDoc(roomRef);
+      if (!roomSnap.exists()) {
+        document.getElementById('mpError').innerText = "Room not found!";
+        return;
+      }
+      let data = roomSnap.data();
+      if (data.started) {
+        document.getElementById('mpError').innerText = "Game already started!";
+        return;
+      }
+      if (data.players && Object.keys(data.players).length >= 5) {
+        document.getElementById('mpError').innerText = "Room is full!";
+        return;
+      }
+      localPlayerId = randomCode() + Date.now();
+      // Add player to room
+      await updateDoc(roomRef, {
+        [`players.${localPlayerId}`]: {
+          name: playerName,
+          score: 0,
+          ready: false,
+          answer: null
+        }
+      });
+      joinGameRoom(code, localPlayerId, false);
+    };
+
+    // --- ROOM LOGIC ---
+    function joinGameRoom(code, playerId, isHost) {
+      gameCode = code;
+      localPlayerId = playerId;
+      show('roomMenu');
+      document.getElementById('roomCodeShow').innerText = "Room Code: " + code;
+      document.getElementById('roomHostShow').innerText = isHost ? "(You are host)" : "";
+      renderRoomPlayers([]);
+      if (gameRoomUnsub) gameRoomUnsub();
+      const roomRef = doc(db, "quiz_games", code);
+      gameRoomUnsub = onSnapshot(roomRef, (snap) => {
+        if (!snap.exists()) {
+          alert("Room closed or deleted!");
+          show('mainMenu');
+          return;
+        }
+        gameRoomData = snap.data();
+        renderRoomPlayers(gameRoomData.players || {});
+        if (gameRoomData.started) {
+          show('gamePlay');
+          startGamePlay();
+        }
+      });
+    }
+
+    function renderRoomPlayers(players) {
+      const zone = document.getElementById('roomPlayers');
+      if (!players || Object.keys(players).length === 0) {
+        zone.innerHTML = "<i>No players yet.</i>";
+        document.getElementById('roomStartBtn').disabled = true;
+        return;
+      }
+      let html = "";
+      let readyCount = 0;
+      Object.entries(players).forEach(([pid, p]) => {
+        html += `<div class="room-player${p.ready ? ' ready' : ''}">${p.name} ${p.ready ? "✔" : ""}</div>`;
+        if (p.ready) readyCount++;
+      });
+      zone.innerHTML = html;
+      // Host can start if at least 2 players are ready
+      if (gameRoomData && localPlayerId === gameRoomData.host) {
+        document.getElementById('roomStartBtn').disabled = readyCount < 2;
+      }
+    }
+
+    window.setReady = async function() {
+      const roomRef = doc(db, "quiz_games", gameCode);
+      await updateDoc(roomRef, {
+        [`players.${localPlayerId}.ready`]: true
+      });
+    };
+
+    window.startGameRoom = async function() {
+      const roomRef = doc(db, "quiz_games", gameCode);
+      await updateDoc(roomRef, {
+        started: true
+      });
+    };
+
+    window.leaveRoom = function() {
+      if (gameRoomUnsub) gameRoomUnsub();
+      show('mainMenu');
+    };
+
+    // --- MULTIPLAYER GAMEPLAY ---
+    let mpQIndex = 0;
+    let mpTimer = null;
+
+    function startGamePlay() {
+      mpQIndex = 0;
+      window.myScore = 0;
+      renderMpQuestion();
+    }
+
+    function renderMpQuestion() {
+      if (mpQIndex >= gameRoomData.questions.length) {
+        // Show results
+        renderMpResults();
+        return;
+      }
+      const q = gameRoomData.questions[mpQIndex];
+      let optionsHtml = q.options.map((opt, i) =>
+        `<button class="mpOptBtn" onclick="window.answerMp(${i})">${opt}</button>`
+      ).join('<br>');
+      document.getElementById('mpQuestionZone').innerHTML = `
+        <div class="mpTimer" id="mpTimer">${timeLeft}</div>
+        <div class="mpQ"><b>Q${mpQIndex+1}:</b> ${q.question}</div>
+        <div class="mpOpts">${optionsHtml}</div>
+        <div id="mpInfo"></div>
+      `;
+      timeLeft = 30;
+      document.getElementById('mpTimer').innerText = timeLeft;
+      if (mpTimer) clearInterval(mpTimer);
+      mpTimer = setInterval(() => {
+        timeLeft--;
+        document.getElementById('mpTimer').innerText = timeLeft;
+        if (timeLeft <= 0) {
+          clearInterval(mpTimer);
+          window.answerMp(-1);
+        }
+      }, 1000);
+      // Listen for all answers
+      listenForAnswers();
+    }
+
+    window.answerMp = async function(idx) {
+      clearInterval(mpTimer);
+      const roomRef = doc(db, "quiz_games", gameCode);
+      await updateDoc(roomRef, {
+        [`players.${localPlayerId}.answer`]: idx
+      });
+      document.getElementById('mpInfo').innerHTML = "<b>Answered!</b> Waiting for others...";
+    };
+
+    function listenForAnswers() {
+      const roomRef = doc(db, "quiz_games", gameCode);
+      let interval = setInterval(async () => {
+        const snap = await getDoc(roomRef);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        let answeredCount = 0;
+        let totalPlayers = Object.keys(data.players).length;
+        Object.values(data.players).forEach(p => {
+          if (typeof p.answer === 'number') answeredCount++;
+        });
+        if (answeredCount === totalPlayers) {
+          clearInterval(interval);
+          setTimeout(() => {
+            processMpAnswers();
+          }, 500);
+        }
+      }, 800);
+    }
+
+    async function processMpAnswers() {
+      const q = gameRoomData.questions[mpQIndex];
+      const roomRef = doc(db, "quiz_games", gameCode);
+      const snap = await getDoc(roomRef);
+      let data = snap.data();
+      let html = "<b>Correct:</b> " + q.options[q.correctAnswerIndex] + "<br>";
+      let scores = {};
+      Object.entries(data.players).forEach(([pid, p]) => {
+        let correct = (p.answer === q.correctAnswerIndex);
+        if (correct) p.score = (p.score || 0) + 1;
+        scores[pid] = p.score || 0;
+        html += `${p.name}: ${p.answer === null || p.answer === -1 ? "<span style='color:#b00'>No Answer</span>" : q.options[p.answer]} ${correct ? "✔" : ""} <br>`;
+      });
+      // Update scores, clear answers
+      let updates = {};
+      Object.entries(scores).forEach(([pid, sc]) => {
+        updates[`players.${pid}.score`] = sc;
+        updates[`players.${pid}.answer`] = null;
+      });
+      await updateDoc(roomRef, updates);
+      document.getElementById('mpQuestionZone').innerHTML = html + "<br><i>Next question in 3 seconds...</i>";
+      setTimeout(() => {
+        mpQIndex++;
+        renderMpQuestion();
+      }, 3000);
+    }
+
+    function renderMpResults() {
+      const players = gameRoomData.players;
+      let html = "<h2>Results:</h2>";
+      Object.values(players).sort((a,b) => (b.score||0) - (a.score||0)).forEach(p => {
+        html += `<div class="room-player">${p.name}: ${p.score || 0}</div>`;
+      });
+      document.getElementById('mpQuestionZone').innerHTML = html;
+    }
+
+  </script>
+  <style>
+    body { font-family:'Segoe UI',Arial,sans-serif; background:#eef2f8; margin:0;}
+    .container { max-width:480px; margin:32px auto; background:#fff; border-radius:8px; box-shadow:0 2px 12px #b8c9e8; padding:32px;}
+    h1 { text-align:center; color:#1976d2;}
+    .page { display:none;}
+    .menu-btn, button { background:#1976d2; color:#fff; border:none; border-radius:4px; padding:10px 20px; cursor:pointer; font-size:16px; margin-bottom:10px;}
+    .menu-btn:hover, button:hover { background:#1456a0;}
+    input[type="text"] { width:100%; padding:8px; border-radius:4px; border:1px solid #b8c9e8; margin-bottom:8px;}
+    .spQ, .mpQ { font-size:1.1em; color:#1976d2; margin-bottom:12px;}
+    .spOpts, .mpOpts { margin-bottom:8px;}
+    .spOptBtn, .mpOptBtn { margin-bottom:5px; width:100%; background:#eef3fa; color:#1976d2; font-weight:bold;}
+    .spOptBtn:hover, .mpOptBtn:hover { background:#c5e1a5; color:#33691e;}
+    .spTimer, .mpTimer { font-size:1.4em; font-weight:bold; color:#b00; text-align:right; margin-bottom:5px;}
+    .room-player { background:#eef3fa; margin-bottom:6px; padding:7px; border-radius:4px;}
+    .room-player.ready { background:#c5e1a5; color:#33691e;}
+    #roomCodeShow { font-size:1.1em; margin-bottom:8px;}
+    #mpError { color:#b00; margin-bottom:8px;}
+    #singleResult { font-weight:bold; margin-top:12px;}
+    #mpQuestionZone { margin-top:18px;}
+    #roomHostShow { color:#1976d2; margin-bottom:8px;}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- MAIN MENU -->
+    <div class="page" id="mainMenu">
+      <h1>Quiz Game</h1>
+      <button class="menu-btn" onclick="startSinglePlayer()">Single Player</button>
+      <button class="menu-btn" onclick="window.gotoMultiplayer()">Multiplayer</button>
+    </div>
+    <!-- SINGLE PLAYER -->
+    <div class="page" id="singlePlayer">
+      <h2>Single Player</h2>
+      <div id="singleQuestionZone"></div>
+      <div id="singleResult"></div>
+      <button onclick="show('mainMenu')">Back</button>
+    </div>
+    <!-- MULTIPLAYER LOBBY -->
+    <div class="page" id="multiLobby">
+      <h2>Multiplayer</h2>
+      <input type="text" id="mpName" placeholder="Your name">
+      <div style="margin:10px 0;"></div>
+      <button onclick="window.createGameRoom()">Create Game Code</button>
+      <div style="margin:6px 0;">OR</div>
+      <input type="text" id="mpCode" placeholder="Enter game code">
+      <button onclick="window.joinGameRoomBtn()">Join Game</button>
+      <div id="mpError"></div>
+      <button onclick="show('mainMenu')">Back</button>
+    </div>
+    <!-- ROOM MENU -->
+    <div class="page" id="roomMenu">
+      <h2>Room Lobby</h2>
+      <div id="roomCodeShow"></div>
+      <div id="roomHostShow"></div>
+      <div id="roomPlayers"></div>
+      <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
+      <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
+      <button onclick="window.leaveRoom()">Leave</button>
+    </div>
+    <!-- GAMEPLAY -->
+    <div class="page" id="gamePlay">
+      <h2>Quiz Game</h2>
+      <div id="mpQuestionZone"></div>
+    </div>
+  </div>
+</body>
+</html>

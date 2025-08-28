@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Climb The Hill - Multiplayer Quiz</title>
+  <script type="module">
+    // --- Firebase Imports ---
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
+    import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
+
+    // --- Firebase Config ---
+    const firebaseConfig = {
+      apiKey: "AIzaSyDh2B68G_kRSGk22Mko8HU3ztPKNgY1EEE",
+      authDomain: "cpe-buddy.firebaseapp.com",
+      projectId: "cpe-buddy",
+      storageBucket: "cpe-buddy.appspot.com",
+      messagingSenderId: "171132740113",
+      appId: "1:171132740113:web:861b870b8f900429fcc7b0",
+      measurementId: "G-PVQTEF4HHZ"
+    };
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // --- Globals ---
+    let playerName = "";
+    let gameCode = "";
+    let localPlayerId = "";
+    let gameRoomUnsub = null;
+    let chatUnsub = null;
+    let gameRoomData = null;
+    let barMax = 20;
+    let mpQIndex = 0;
+    let wrongStreak = 0;
+    let timerInterval = null;
+    let endTime = 0;
+    let gameEnded = false;
+
+    // --- Utility ---
+    function randomCode() {
+      return Math.random().toString(36).substring(2,8).toUpperCase();
+    }
+    function chooseQuestions(arr, n) {
+      if (arr.length <= n) return arr;
+      const shuffled = arr.slice().sort(() => Math.random() - 0.5);
+      return shuffled.slice(0, n);
+    }
+    function show(pageId) {
+      document.querySelectorAll('.page').forEach(p => p.style.display = 'none');
+      document.getElementById(pageId).style.display = 'flex';
+    }
+    window.show = show; // for inline HTML onclick
+
+    // --- Main Menu ---
+    window.gotoMultiplayer = function() {
+      show('multiLobby');
+      document.getElementById('mpError').innerText = "";
+    };
+
+    window.onload = function() {
+      show('mainMenu');
+    };
+
+    // --- Create Game Room ---
+    window.createGameRoom = async function() {
+      playerName = document.getElementById('mpName').value.trim();
+      if (!playerName) {
+        document.getElementById('mpError').innerText = "Enter your name!";
+        return;
+      }
+      gameCode = randomCode();
+      localPlayerId = randomCode() + Date.now();
+      const colRef = collection(db, "computersystem_questions");
+      const snapshot = await getDocs(colRef);
+      let questions = [];
+      snapshot.forEach(docSnap => {
+        const q = docSnap.data();
+        questions.push(q);
+      });
+      questions = chooseQuestions(questions, 30);
+      // Add server-side timestamp for endTime (now + 5 mins)
+      endTime = Date.now() + 5 * 60 * 1000;
+      await setDoc(doc(db, "climb_games", gameCode), {
+        code: gameCode,
+        host: localPlayerId,
+        started: false,
+        questions,
+        barMax,
+        endTime,
+        winner: null,
+        players: {
+          [localPlayerId]: {
+            name: playerName,
+            bar: 0,
+            wrongStreak: 0,
+            mpQIndex: 0,
+            finished: false,
+            score: 0
+          }
+        }
+      });
+      joinGameRoom(gameCode, localPlayerId, true);
+    };
+
+    // --- Join Game Room ---
+    window.joinGameRoomBtn = async function() {
+      playerName = document.getElementById('mpName').value.trim();
+      if (!playerName) {
+        document.getElementById('mpError').innerText = "Enter your name!";
+        return;
+      }
+      const code = document.getElementById('mpCode').value.trim().toUpperCase();
+      if (!code) {
+        document.getElementById('mpError').innerText = "Enter code!";
+        return;
+      }
+      const roomRef = doc(db, "climb_games", code);
+      const roomSnap = await getDoc(roomRef);
+      if (!roomSnap.exists()) {
+        document.getElementById('mpError').innerText = "Room not found!";
+        return;
+      }
+      let data = roomSnap.data();
+      if (data.started) {
+        document.getElementById('mpError').innerText = "Game already started!";
+        return;
+      }
+      if (data.players && Object.keys(data.players).length >= 5) {
+        document.getElementById('mpError').innerText = "Room is full!";
+        return;
+      }
+      localPlayerId = randomCode() + Date.now();
+      await updateDoc(roomRef, {
+        [`players.${localPlayerId}`]: {
+          name: playerName,
+          bar: 0,
+          wrongStreak: 0,
+          mpQIndex: 0,
+          finished: false,
+          score: 0
+        }
+      });
+      joinGameRoom(code, localPlayerId, false);
+    };
+
+    // --- ROOM LOGIC ---
+    function joinGameRoom(code, playerId, isHost) {
+      gameCode = code;
+      localPlayerId = playerId;
+      show('roomMenu');
+      document.getElementById('roomCodeShow').innerText = "Room Code: " + code;
+      document.getElementById('roomHostShow').innerText = isHost ? "(You are host)" : "";
+      renderRoomPlayers([]);
+      if (gameRoomUnsub) gameRoomUnsub();
+      const roomRef = doc(db, "climb_games", code);
+      gameRoomUnsub = onSnapshot(roomRef, (snap) => {
+        if (!snap.exists()) {
+          alert("Room closed or deleted!");
+          show('mainMenu');
+          return;
+        }
+        gameRoomData = snap.data();
+        renderRoomPlayers(gameRoomData.players || {});
+        if (gameRoomData.started) {
+          show('gamePlay');
+          startGamePlay();
+          setupChat(gameCode); // Start chat only in game
+        }
+      });
+    }
+
+    function renderRoomPlayers(players) {
+      const zone = document.getElementById('roomPlayers');
+      if (!players || Object.keys(players).length === 0) {
+        zone.innerHTML = "<i>No players yet.</i>";
+        document.getElementById('roomStartBtn').disabled = true;
+        return;
+      }
+      let html = "";
+      let readyCount = 0;
+      Object.entries(players).forEach(([pid, p]) => {
+        html += `<div class="room-player${p.ready ? ' ready' : ''}">${p.name} ${p.ready ? "✔" : ""}</div>`;
+        if (p.ready) readyCount++;
+      });
+      zone.innerHTML = html;
+      if (gameRoomData && localPlayerId === gameRoomData.host) {
+        document.getElementById('roomStartBtn').disabled = readyCount < 2;
+      }
+    }
+
+    window.setReady = async function() {
+      const roomRef = doc(db, "climb_games", gameCode);
+      await updateDoc(roomRef, {
+        [`players.${localPlayerId}.ready`]: true
+      });
+    };
+
+    window.startGameRoom = async function() {
+      const roomRef = doc(db, "climb_games", gameCode);
+      await updateDoc(roomRef, {
+        started: true
+      });
+    };
+
+    window.leaveRoom = function() {
+      if (gameRoomUnsub) gameRoomUnsub();
+      show('mainMenu');
+    };
+
+    // --- GAMEPLAY ---
+    function startGamePlay() {
+      // Get endTime from room and start timer
+      endTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
+      gameEnded = false;
+      setupGlobalTimer();
+      renderBars(); // Only draw bars once initially
+      renderGameScreen();
+    }
+
+    // --- TIMER ---
+    function setupGlobalTimer() {
+      clearInterval(timerInterval);
+      updateTimer();
+      timerInterval = setInterval(updateTimer, 1000);
+    }
+    function updateTimer() {
+      const now = Date.now();
+      let secs = Math.max(0, Math.floor((endTime-now)/1000));
+      const min = String(Math.floor(secs/60)).padStart(2,"0");
+      const s = String(secs%60).padStart(2,"0");
+      document.getElementById('globalTimer').innerText = `${min}:${s}`;
+      if (secs <= 0 && !gameEnded) {
+        gameEnded = true;
+        showResults("Time's up! Here are the scores:");
+      }
+    }
+
+    // --- BAR DRAW (only refresh on right answer) ---
+    function renderBars() {
+      const players = gameRoomData.players;
+      let barsHtml = "";
+      Object.entries(players).forEach(([pid, p]) => {
+        let width = Math.round((p.bar/barMax)*100);
+        let color = pid === localPlayerId ? "#FFD700" : "#2196f3";
+        barsHtml += `
+          <div class="player-bar">
+            <div class="bar-label">${p.name}</div>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${width}%;background:${color}"></div>
+            </div>
+          </div>
+        `;
+      });
+      document.getElementById('barsZone').innerHTML = barsHtml;
+    }
+
+    // --- GAME CENTER / QUESTIONS ---
+    function renderGameScreen() {
+      // Don't redraw bars except at game start or on right answer
+      // Center: question
+      const player = gameRoomData.players[localPlayerId];
+      // Find mpQIndex for this player (all players have their own)
+      mpQIndex = player.mpQIndex || 0;
+      wrongStreak = player.wrongStreak || 0;
+      let q = gameRoomData.questions[mpQIndex];
+      if (!q) {
+        showResults();
+        return;
+      }
+      let questionHtml = `
+        <div class="question-title">Q${mpQIndex+1}: ${q.question}</div>
+        <div class="options">
+          ${q.options.map((opt, i) =>
+            `<button class="option-btn" onclick="window.answerMp(${i})">${opt}</button>`
+          ).join('')}
+        </div>
+        <div class="flag-progress">
+          <div class="flag-img"></div>
+          <div class="hill"></div>
+        </div>
+      `;
+      document.getElementById('gameCenter').innerHTML = questionHtml;
+    }
+
+    function showResults(msg = "Game Over!") {
+      // Stop timer
+      clearInterval(timerInterval);
+      // Find winner (by bar) or if set
+      let winner = gameRoomData.winner;
+      if (!winner) {
+        let arr = Object.entries(gameRoomData.players).sort((a, b) => (b[1].bar||0)-(a[1].bar||0));
+        winner = arr[0][1].bar >= barMax ? arr[0][1].name : null;
+      }
+      let players = gameRoomData.players;
+      let html = `<div class="flag-trophy"></div>
+        <h2>${msg}</h2>
+        ${winner ? `<div style="color:#FFD700;font-size:1.3em;font-weight:bold;">Winner: ${winner}</div>` : ""}
+        <div class="leaderboard">${renderLeaderboard(players)}</div>`;
+      document.getElementById('gameCenter').innerHTML = html;
+    }
+
+    function renderLeaderboard(players) {
+      let arr = Object.values(players).sort((a,b) => (b.bar||0)-(a.bar||0));
+      return arr.map(p => `<div>${p.name}: <b>${p.bar} / ${barMax}</b></div>`).join('');
+    }
+
+    window.answerMp = async function(idx) {
+      // Prevent answers after game over
+      if (gameEnded) return;
+      // Only update your own state
+      let roomRef = doc(db, "climb_games", gameCode);
+      let player = gameRoomData.players[localPlayerId];
+      let q = gameRoomData.questions[player.mpQIndex];
+      if (!q) return;
+      let correct = idx === q.correctAnswerIndex;
+      let updates = {};
+      let newBar = player.bar || 0;
+      let newWrongStreak = player.wrongStreak || 0;
+      let nextQIndex = (player.mpQIndex || 0) + 1;
+      if (correct) {
+        newBar = Math.min(newBar + 1, barMax);
+        newWrongStreak = 0;
+      } else {
+        newWrongStreak += 1;
+        if (newWrongStreak >= 2) {
+          newBar = Math.max(newBar - 1, 0);
+          newWrongStreak = 0;
+        }
+      }
+      updates[`players.${localPlayerId}.bar`] = newBar;
+      updates[`players.${localPlayerId}.wrongStreak`] = newWrongStreak;
+      updates[`players.${localPlayerId}.mpQIndex`] = nextQIndex;
+      // End game if bar is maxed for anyone
+      let winnerName = null;
+      if (correct && newBar >= barMax && !gameRoomData.winner) winnerName = player.name;
+      if (winnerName) {
+        updates["winner"] = winnerName;
+      }
+      await updateDoc(roomRef, updates);
+
+      // Only update bars for all if correct and bar changed
+      if (correct) {
+        // Wait for onSnapshot to update gameRoomData, then redraw bars and center
+        // But for instant UX, do it here for yourself
+        let localPlayers = {...gameRoomData.players};
+        localPlayers[localPlayerId] = {
+          ...localPlayers[localPlayerId],
+          bar: newBar,
+          wrongStreak: newWrongStreak,
+          mpQIndex: nextQIndex
+        };
+        renderBars();
+      }
+      // Always refresh center for yourself
+      // (wait a bit to ensure Firestore sync)
+      setTimeout(() => {
+        // If winner set, show results for everyone!
+        if (winnerName || (gameRoomData && gameRoomData.winner)) {
+          gameEnded = true;
+          showResults("We have a winner!");
+        } else {
+          // Only the center area
+          // Get latest player state
+          gameRoomData.players[localPlayerId].bar = newBar;
+          gameRoomData.players[localPlayerId].wrongStreak = newWrongStreak;
+          gameRoomData.players[localPlayerId].mpQIndex = nextQIndex;
+          renderGameScreen();
+        }
+      }, 150);
+    };
+
+    // --- Live Chat (Firestore) ---
+    function setupChat(code) {
+      const chatZone = document.getElementById('chatDisplay');
+      chatZone.innerHTML = "";
+      const chatCol = collection(db, `climb_chat_${code}`);
+      const chatQ = query(chatCol, orderBy("ts"));
+      if (chatUnsub) chatUnsub();
+      chatUnsub = onSnapshot(chatQ, snap => {
+        let arr = [];
+        snap.forEach(doc => arr.push(doc.data()));
+        chatZone.innerHTML = arr.map(msg => `<div class="chat-msg"><b>${msg.name}</b>: ${msg.text}</div>`).join('');
+        chatZone.scrollTop = chatZone.scrollHeight;
+      });
+    }
+    window.sendChatMsg = async function() {
+      let msg = document.getElementById('chatInput').value.trim();
+      if (!msg) return;
+      const chatCol = collection(db, `climb_chat_${gameCode}`);
+      await addDoc(chatCol, {
+        name: playerName,
+        text: msg,
+        ts: Date.now()
+      });
+      document.getElementById('chatInput').value = "";
+    };
+
+  </script>
+  <style>
+    html, body { height:100%; }
+    body { margin:0; min-height:100vh; background:#000; }
+    .container { max-width:1100px; margin:32px auto; background:rgba(20,18,38,0.93); border-radius:16px; box-shadow:0 4px 24px #001d3d; padding:24px; display:flex; flex-direction:column; align-items:center;}
+    .page { display:none; width:100%; min-height:600px; justify-content:center; align-items:center; }
+    h1, h2 { text-align:center; color:#FFD700; text-shadow: 0 2px 10px #000;}
+    #globalTimer { font-size:2em; color:#FFD700; text-align:center; font-weight:bold; margin-bottom:8px; letter-spacing:2px; }
+    .menu-btn, button { background:linear-gradient(90deg,#6D28D9,#3B82F6); color:#fff; border:none; border-radius:8px; padding:14px 32px; cursor:pointer; font-size:20px; margin-bottom:16px; box-shadow:0 2px 8px #0004;}
+    .menu-btn:hover, button:hover { background:linear-gradient(90deg,#FFD700,#3B82F6);}
+    input[type="text"] { width:100%; padding:10px; border-radius:6px; border:1px solid #b8c9e8; margin-bottom:12px; background:#181732; color:#fff;}
+    .room-player { background:#3B82F6; margin-bottom:10px; padding:10px; border-radius:8px; color:#fff; font-weight:bold; box-shadow:0 1px 6px #0003;}
+    .room-player.ready { background:#FFD700; color:#333;}
+    #roomCodeShow { font-size:1.3em; margin-bottom:12px;}
+    #mpError { color:#FFD700; margin-bottom:12px;}
+    #roomStartBtn:disabled { opacity:0.5; pointer-events:none;}
+    /* Game Layout */
+    #gamePlay { display:flex; flex-direction:row; gap:24px; min-height:700px; }
+    .bars-side { width:200px; background:rgba(40,30,60,0.8); border-radius:16px; padding:18px; min-height:600px; box-shadow:0 2px 16px #0005;}
+    .player-bar { margin-bottom:18px; }
+    .bar-label { color:#FFD700; font-weight:bold; margin-bottom:2px;}
+    .bar-track { background:#222; border-radius:8px; height:24px; width:100%; margin-bottom:2px;}
+    .bar-fill { height:24px; border-radius:8px 0 0 8px;}
+    .game-center { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;}
+    .question-title { font-size:1.3em; color:#fff; margin-bottom:18px; font-weight:bold; text-shadow:0 2px 8px #000;}
+    .options { display:flex; flex-direction:column; gap:13px; }
+    .option-btn { background:linear-gradient(90deg,#3B82F6,#FFD700); color:#222; font-weight:bold; border:none; border-radius:8px; padding:11px 20px; font-size:18px; box-shadow:0 1px 8px #0005; }
+    .option-btn:hover { background:linear-gradient(90deg,#FFD700,#3B82F6); color:#fff;}
+    .flag-progress { margin:38px 0 15px 0; position:relative; height:90px; width:260px; }
+    .flag-img { position:absolute; left:210px; top:30px; width:48px; height:48px; background:url('https://img.icons8.com/color/96/flag.png') no-repeat center/contain;}
+    .hill { position:absolute; left:0; top:50px; width:220px; height:32px; background:linear-gradient(90deg,#1e293b,#3B82F6 60%,#FFD700 100%); border-radius:22px 22px 55px 22px;}
+    .flag-trophy { width:100px; height:100px; background:url('https://img.icons8.com/color/96/trophy.png') no-repeat center/contain; margin:0 auto 18px auto;}
+    .leaderboard { color:#fff; font-size:1.18em; background:rgba(34,34,54,0.7); border-radius:8px; padding:12px;}
+    /* Chat Side */
+    .chat-side { width:260px; background:rgba(40,30,60,0.8); border-radius:16px; min-height:600px; box-shadow:0 2px 16px #0005; display:flex; flex-direction:column;}
+    .chat-header { color:#FFD700; font-weight:bold; font-size:1.2em; margin-bottom:8px; text-align:center;}
+    #chatDisplay { flex:1; overflow-y:auto; max-height:420px; margin-bottom:10px; padding:8px 0;}
+    .chat-msg { color:#fff; margin-bottom:7px; }
+    #chatInput { width:88%; margin-right:2%; background:#222; color:#FFD700; border:none; border-radius:8px; padding:8px;}
+    /* Responsive */
+    @media (max-width:900px) {
+      #gamePlay { flex-direction:column; align-items:center;}
+      .bars-side, .chat-side { width:90vw; min-height:180px; margin-bottom:18px;}
+      .game-center { width:95vw;}
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- MAIN MENU -->
+    <div class="page" id="mainMenu" style="flex-direction:column;align-items:center;">
+      <h1>Climb The Hill</h1>
+      <button class="menu-btn" onclick="window.gotoMultiplayer()">Start Multiplayer</button>
+      <div style="margin-top:18px;color:#FFD700;text-shadow:0 1px 8px #000;font-size:1.15em;">
+        <b>Answer right to climb, every 2 wrongs lose 1 bar. First to the flag wins, or whoever is ahead after 5 minutes!</b>
+      </div>
+    </div>
+    <!-- MULTIPLAYER LOBBY -->
+    <div class="page" id="multiLobby" style="flex-direction:column;">
+      <h2>Multiplayer Lobby</h2>
+      <input type="text" id="mpName" placeholder="Your name">
+      <button onclick="window.createGameRoom()">Create Game Room</button>
+      <div style="margin:8px 0;">OR</div>
+      <input type="text" id="mpCode" placeholder="Enter game code">
+      <button onclick="window.joinGameRoomBtn()">Join Game</button>
+      <div id="mpError"></div>
+      <button onclick="show('mainMenu')">Back</button>
+    </div>
+    <!-- ROOM MENU -->
+    <div class="page" id="roomMenu" style="flex-direction:column;">
+      <h2>Room Lobby</h2>
+      <div id="roomCodeShow"></div>
+      <div id="roomHostShow"></div>
+      <div id="roomPlayers"></div>
+      <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
+      <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
+      <button onclick="window.leaveRoom()">Leave</button>
+    </div>
+    <!-- GAMEPLAY -->
+    <div class="page" id="gamePlay" style="display:flex;flex-direction:row;">
+      <div style="position:absolute;top:24px;left:0;right:0;z-index:3;">
+        <div id="globalTimer"></div>
+      </div>
+      <div class="bars-side" id="barsZone"></div>
+      <div class="game-center" id="gameCenter"></div>
+      <div class="chat-side" id="chatSide">
+        <div class="chat-header">Live Chat</div>
+        <div id="chatDisplay"></div>
+        <div style="display:flex;align-items:center;">
+          <input type="text" id="chatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendChatMsg();">
+          <button onclick="window.sendChatMsg()" style="padding:8px 18px;">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
