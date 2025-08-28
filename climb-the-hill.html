@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Climb The Hill - Multiplayer Quiz</title>
+  <link rel="stylesheet" href="climb-the-hill.css">
+</head>
+<body>
+  <div class="container">
+    <div id="leaderboardBar"></div>
+    <!-- MAIN MENU -->
+    <div class="page" id="mainMenu" style="flex-direction:column;align-items:center;">
+      <h1>Climb The Hill</h1>
+      <button class="menu-btn" onclick="window.gotoMultiplayer()">Start Multiplayer</button>
+      <div class="subtitle">
+        <b>Answer right to climb, every 2 wrongs lose 1 bar. First to the flag wins, or whoever is ahead after 5 minutes!</b>
+      </div>
+    </div>
+    <!-- MULTIPLAYER LOBBY -->
+    <div class="page" id="multiLobby">
+      <h2>Multiplayer Lobby</h2>
+      <input type="text" id="mpName" placeholder="Your name">
+      <button onclick="window.createGameRoom()">Create Game Room</button>
+      <div class="or">OR</div>
+      <input type="text" id="mpCode" placeholder="Enter game code">
+      <button onclick="window.joinGameRoomBtn()">Join Game</button>
+      <div id="mpError"></div>
+      <button onclick="show('mainMenu')">Back</button>
+    </div>
+    <!-- ROOM MENU -->
+    <div class="page" id="roomMenu">
+      <h2>Room Lobby</h2>
+      <div id="roomCodeShow"></div>
+      <div id="roomHostShow"></div>
+      <div id="roomPlayers"></div>
+      <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
+      <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
+      <button onclick="window.leaveRoom()">Leave</button>
+      <div class="chat-side" id="lobbyChatSide">
+        <div class="chat-header">Lobby Chat</div>
+        <div id="lobbyChatDisplay"></div>
+        <div class="chat-input-row">
+          <input type="text" id="lobbyChatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendLobbyChatMsg();">
+          <button onclick="window.sendLobbyChatMsg()">Send</button>
+        </div>
+      </div>
+    </div>
+    <!-- GAMEPLAY -->
+    <div class="page" id="gamePlay">
+      <div class="global-timer-bar">
+        <div id="globalTimer"></div>
+      </div>
+      <div class="bars-side" id="barsZone"></div>
+      <div class="game-center" id="gameCenter"></div>
+      <div class="chat-side" id="chatSide">
+        <div class="chat-header">Live Chat</div>
+        <div id="chatDisplay"></div>
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendChatMsg();">
+          <button onclick="window.sendChatMsg()">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="climb-the-hill.js"></script>
+</body>
+</html>
