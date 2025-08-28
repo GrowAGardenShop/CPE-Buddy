@@ -4,9 +4,11 @@
   <meta charset="UTF-8">
   <title>Climb The Hill - Multiplayer Quiz</title>
   <script type="module">
+    // --- Firebase Imports ---
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
-    import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
+    import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy, deleteField } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
 
+    // --- Firebase Config ---
     const firebaseConfig = {
       apiKey: "AIzaSyDh2B68G_kRSGk22Mko8HU3ztPKNgY1EEE",
       authDomain: "cpe-buddy.firebaseapp.com",
@@ -25,13 +27,17 @@
     let localPlayerId = "";
     let gameRoomUnsub = null;
     let chatUnsub = null;
+    let lobbyChatUnsub = null;
     let gameRoomData = null;
     let barMax = 20;
     let timerInterval = null;
     let endTime = 0;
     let gameEnded = false;
-    let playAgainClicked = false; // local state for button
-    let leaderboard = {}; // local only, always fetched from Firestore
+    let playAgainClicked = false;
+    let leaderboard = {};
+    let lastBarSnapshot = {};
+    let kickedFlag = false;
+    let joinLock = false; // prevent join spam
 
     // --- Utility ---
     function randomCode() {
@@ -55,6 +61,32 @@
     };
     window.onload = function() {
       show('mainMenu');
+    };
+
+    // --- Lobby Chat ---
+    function setupLobbyChat(code) {
+      const chatZone = document.getElementById('lobbyChatDisplay');
+      chatZone.innerHTML = "";
+      const chatCol = collection(db, `climb_lobby_chat_${code}`);
+      const chatQ = query(chatCol, orderBy("ts"));
+      if (lobbyChatUnsub) lobbyChatUnsub();
+      lobbyChatUnsub = onSnapshot(chatQ, snap => {
+        let arr = [];
+        snap.forEach(doc => arr.push(doc.data()));
+        chatZone.innerHTML = arr.map(msg => `<div class="chat-msg"><b>${msg.name}</b>: ${msg.text}</div>`).join('');
+        chatZone.scrollTop = chatZone.scrollHeight;
+      });
+    }
+    window.sendLobbyChatMsg = async function() {
+      let msg = document.getElementById('lobbyChatInput').value.trim();
+      if (!msg) return;
+      const chatCol = collection(db, `climb_lobby_chat_${gameCode}`);
+      await addDoc(chatCol, {
+        name: playerName,
+        text: msg,
+        ts: Date.now()
+      });
+      document.getElementById('lobbyChatInput').value = "";
     };
 
     // --- Create Game Room ---
@@ -101,48 +133,60 @@
       joinGameRoom(gameCode, localPlayerId, true);
     };
 
-    // --- Join Game Room ---
+    // --- Join Game Room: Prevent join spam, only 1 join allowed per user ---
     window.joinGameRoomBtn = async function() {
-      playerName = document.getElementById('mpName').value.trim();
-      if (!playerName) {
-        document.getElementById('mpError').innerText = "Enter your name!";
-        return;
+      if (joinLock) return;
+      joinLock = true;
+      try {
+        playerName = document.getElementById('mpName').value.trim();
+        if (!playerName) {
+          document.getElementById('mpError').innerText = "Enter your name!";
+          joinLock = false; return;
+        }
+        const code = document.getElementById('mpCode').value.trim().toUpperCase();
+        if (!code) {
+          document.getElementById('mpError').innerText = "Enter code!";
+          joinLock = false; return;
+        }
+        const roomRef = doc(db, "climb_games", code);
+        const roomSnap = await getDoc(roomRef);
+        if (!roomSnap.exists()) {
+          document.getElementById('mpError').innerText = "Room not found!";
+          joinLock = false; return;
+        }
+        let data = roomSnap.data();
+        if (data.started) {
+          document.getElementById('mpError').innerText = "Game already started!";
+          joinLock = false; return;
+        }
+        if (data.players && Object.keys(data.players).length >= 5) {
+          document.getElementById('mpError').innerText = "Room is full!";
+          joinLock = false; return;
+        }
+        // Check if player with the same name already exists in the room, prevent duplicate join
+        let duplicate = Object.values(data.players || {}).some(p => p.name === playerName);
+        if (duplicate) {
+          document.getElementById('mpError').innerText = "This name already joined!";
+          joinLock = false; return;
+        }
+        localPlayerId = randomCode() + Date.now();
+        let leaderboardPatch = data.leaderboard || {};
+        leaderboardPatch[localPlayerId] = leaderboardPatch[localPlayerId] || 0;
+        await updateDoc(roomRef, {
+          [`players.${localPlayerId}`]: {
+            name: playerName,
+            bar: 0,
+            wrongStreak: 0,
+            mpQIndex: 0,
+            finished: false,
+            score: 0
+          },
+          leaderboard: leaderboardPatch
+        });
+        joinGameRoom(code, localPlayerId, false);
+      } finally {
+        setTimeout(() => { joinLock = false; }, 1500); // Slow join (prevent spam)
       }
-      const code = document.getElementById('mpCode').value.trim().toUpperCase();
-      if (!code) {
-        document.getElementById('mpError').innerText = "Enter code!";
-        return;
-      }
-      const roomRef = doc(db, "climb_games", code);
-      const roomSnap = await getDoc(roomRef);
-      if (!roomSnap.exists()) {
-        document.getElementById('mpError').innerText = "Room not found!";
-        return;
-      }
-      let data = roomSnap.data();
-      if (data.started) {
-        document.getElementById('mpError').innerText = "Game already started!";
-        return;
-      }
-      if (data.players && Object.keys(data.players).length >= 5) {
-        document.getElementById('mpError').innerText = "Room is full!";
-        return;
-      }
-      localPlayerId = randomCode() + Date.now();
-      let leaderboardPatch = data.leaderboard || {};
-      leaderboardPatch[localPlayerId] = leaderboardPatch[localPlayerId] || 0;
-      await updateDoc(roomRef, {
-        [`players.${localPlayerId}`]: {
-          name: playerName,
-          bar: 0,
-          wrongStreak: 0,
-          mpQIndex: 0,
-          finished: false,
-          score: 0
-        },
-        leaderboard: leaderboardPatch
-      });
-      joinGameRoom(code, localPlayerId, false);
     };
 
     // --- ROOM LOGIC ---
@@ -150,10 +194,12 @@
       gameCode = code;
       localPlayerId = playerId;
       playAgainClicked = false;
+      kickedFlag = false;
       show('roomMenu');
       document.getElementById('roomCodeShow').innerText = "Room Code: " + code;
       document.getElementById('roomHostShow').innerText = isHost ? "(You are host)" : "";
       renderRoomPlayers([]);
+      setupLobbyChat(code);
       if (gameRoomUnsub) gameRoomUnsub();
       const roomRef = doc(db, "climb_games", code);
       gameRoomUnsub = onSnapshot(roomRef, (snap) => {
@@ -164,9 +210,17 @@
         }
         gameRoomData = snap.data();
         leaderboard = gameRoomData.leaderboard || {};
+        // Check if we've been kicked
+        if (!gameRoomData.players[localPlayerId] && !kickedFlag && !gameRoomData.started) {
+          kickedFlag = true;
+          alert("You have been kicked from the room.");
+          show('mainMenu');
+          return;
+        }
         renderRoomPlayers(gameRoomData.players || {});
         if (gameRoomData.started) {
           show('gamePlay');
+          if (lobbyChatUnsub) lobbyChatUnsub();
           startGamePlay();
           setupChat(gameCode);
         }
@@ -183,7 +237,11 @@
       let html = "";
       let readyCount = 0;
       Object.entries(players).forEach(([pid, p]) => {
-        html += `<div class="room-player${p.ready ? ' ready' : ''}">${p.name} ${p.ready ? "✔" : ""}</div>`;
+        let kickBtn = "";
+        if (gameRoomData && localPlayerId === gameRoomData.host && pid !== localPlayerId) {
+          kickBtn = `<button style="margin-left:8px;background:#b00;" onclick="window.kickPlayer('${pid}')" title="Kick">Kick</button>`;
+        }
+        html += `<div class="room-player${p.ready ? ' ready' : ''}">${p.name} ${p.ready ? "✔" : ""}${kickBtn}</div>`;
         if (p.ready) readyCount++;
       });
       zone.innerHTML = html;
@@ -191,6 +249,14 @@
         document.getElementById('roomStartBtn').disabled = readyCount < 2;
       }
     }
+
+    window.kickPlayer = async function(pid) {
+      if (!confirm("Kick this player?")) return;
+      const roomRef = doc(db, "climb_games", gameCode);
+      let patch = {};
+      patch[`players.${pid}`] = deleteField();
+      await updateDoc(roomRef, patch);
+    };
 
     window.setReady = async function() {
       const roomRef = doc(db, "climb_games", gameCode);
@@ -208,6 +274,14 @@
 
     window.leaveRoom = function() {
       if (gameRoomUnsub) gameRoomUnsub();
+      if (lobbyChatUnsub) lobbyChatUnsub();
+      // Remove self from players in room
+      if (gameCode && localPlayerId) {
+        const roomRef = doc(db, "climb_games", gameCode);
+        let patch = {};
+        patch[`players.${localPlayerId}`] = deleteField();
+        updateDoc(roomRef, patch);
+      }
       show('mainMenu');
     };
 
@@ -216,6 +290,7 @@
       endTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
       gameEnded = false;
       playAgainClicked = false;
+      lastBarSnapshot = {};
       setupGlobalTimer();
       renderBars();
       renderGameScreen();
@@ -240,11 +315,22 @@
       }
     }
 
-    // --- BAR DRAW (only refresh on right answer) ---
+    // --- BAR DRAW (only refresh if bar actually changes) ---
     function renderBars() {
       const players = gameRoomData.players;
-      let barsHtml = "";
+      let barVals = {};
       Object.entries(players).forEach(([pid, p]) => {
+        barVals[pid] = p.bar || 0;
+      });
+      // Only redraw if bars actually changed
+      let changed = false;
+      for (let pid in barVals) {
+        if (lastBarSnapshot[pid] !== barVals[pid]) { changed = true; break; }
+      }
+      if (!changed) return;
+      lastBarSnapshot = {...barVals};
+      let barsHtml = "";
+      Object.entries(players).sort((a,b) => (b[1].bar||0)-(a[1].bar||0)).forEach(([pid, p]) => {
         let width = Math.round((p.bar/barMax)*100);
         let color = pid === localPlayerId ? "#FFD700" : "#2196f3";
         barsHtml += `
@@ -287,7 +373,6 @@
       clearInterval(timerInterval);
       gameEnded = true;
       renderLeaderboardBar();
-      // Find winner (by bar) or if set
       let winnerId = null;
       if (gameRoomData.winner) {
         let nameToId = Object.entries(gameRoomData.players).find(([pid, p]) => p.name === gameRoomData.winner);
@@ -312,10 +397,8 @@
     }
 
     function renderLeaderboardBar() {
-      // Top leaderboard for wins
       let playerMap = gameRoomData.players;
       let leaderboardObj = gameRoomData.leaderboard || {};
-      // Display player names + #wins, sorted
       let arr = Object.entries(leaderboardObj)
         .map(([pid, wins]) => ({
           name: playerMap[pid]?.name || "Player",
@@ -328,7 +411,6 @@
 
     // --- PLAY AGAIN LOGIC ---
     function setupPlayAgainButton(winnerId) {
-      // In result page, show button and display X/Y
       let playAgainArr = gameRoomData.playAgain || [];
       let totalPlayers = Object.keys(gameRoomData.players).length;
       let alreadyClicked = playAgainArr.includes(localPlayerId);
@@ -339,7 +421,6 @@
       `;
       document.getElementById('playAgainZone').innerHTML = btnHtml;
       if (playAgainArr.length === totalPlayers) {
-        // All ready, restart!
         setTimeout(() => restartGame(winnerId), 1000);
       }
     }
@@ -347,7 +428,6 @@
     window.playAgainClick = async function() {
       if (playAgainClicked) return;
       playAgainClicked = true;
-      // Add self to playAgain array in Firestore
       const roomRef = doc(db, "climb_games", gameCode);
       const snap = await getDoc(roomRef);
       let arr = snap.data().playAgain || [];
@@ -357,12 +437,9 @@
 
     // --- GAME RESTART, RESET STUFF, NEW QUESTIONS ---
     async function restartGame(winnerId) {
-      // Only host does restart
       if (localPlayerId !== gameRoomData.host) return;
-      // Update leaderboard for winner
       let leaderboardObj = {...(gameRoomData.leaderboard || {})};
       if (winnerId) leaderboardObj[winnerId] = (leaderboardObj[winnerId] || 0) + 1;
-      // New question set
       const colRef = collection(db, "computersystem_questions");
       const snapshot = await getDocs(colRef);
       let questions = [];
@@ -502,9 +579,9 @@
     /* Chat Side */
     .chat-side { width:260px; background:rgba(40,30,60,0.8); border-radius:16px; min-height:600px; box-shadow:0 2px 16px #0005; display:flex; flex-direction:column;}
     .chat-header { color:#FFD700; font-weight:bold; font-size:1.2em; margin-bottom:8px; text-align:center;}
-    #chatDisplay { flex:1; overflow-y:auto; max-height:420px; margin-bottom:10px; padding:8px 0;}
+    #chatDisplay, #lobbyChatDisplay { flex:1; overflow-y:auto; max-height:420px; margin-bottom:10px; padding:8px 0;}
     .chat-msg { color:#fff; margin-bottom:7px; }
-    #chatInput { width:88%; margin-right:2%; background:#222; color:#FFD700; border:none; border-radius:8px; padding:8px;}
+    #chatInput, #lobbyChatInput { width:88%; margin-right:2%; background:#222; color:#FFD700; border:none; border-radius:8px; padding:8px;}
     /* Responsive */
     @media (max-width:900px) {
       #gamePlay { flex-direction:column; align-items:center;}
@@ -544,6 +621,14 @@
       <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
       <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
       <button onclick="window.leaveRoom()">Leave</button>
+      <div class="chat-side" id="lobbyChatSide">
+        <div class="chat-header">Lobby Chat</div>
+        <div id="lobbyChatDisplay"></div>
+        <div style="display:flex;align-items:center;">
+          <input type="text" id="lobbyChatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendLobbyChatMsg();">
+          <button onclick="window.sendLobbyChatMsg()" style="padding:8px 18px;">Send</button>
+        </div>
+      </div>
     </div>
     <!-- GAMEPLAY -->
     <div class="page" id="gamePlay" style="display:flex;flex-direction:row;">
