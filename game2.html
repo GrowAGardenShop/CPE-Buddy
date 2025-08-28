@@ -69,7 +69,7 @@
       }
       gameCode = randomCode();
       localPlayerId = randomCode() + Date.now();
-      const colRef = collection(db, "computersystem_questions");
+      const colRef = collection(db, "datandigitial_questions");
       const snapshot = await getDocs(colRef);
       let questions = [];
       snapshot.forEach(docSnap => {
