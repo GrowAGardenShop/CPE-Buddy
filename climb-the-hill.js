@@ -1,6 +1,3 @@
-// Climb The Hill - Multiplayer Quiz Game Logic (2024-08-28)
-// Make sure you have updated climb-the-hill.html and climb-the-hill.css as well!
-
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
 import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy, deleteField } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
 
@@ -221,7 +218,6 @@ function joinGameRoom(code, playerId, isHost) {
     renderLeaderboardBar();
 
     // --- PLAY AGAIN FIX LOGIC ---
-    // If a new round has started, and this player is not finished/completed, go to game
     const player = gameRoomData.players[localPlayerId];
     if (
       gameRoomData.started &&
@@ -229,10 +225,8 @@ function joinGameRoom(code, playerId, isHost) {
       player &&
       !player.finished &&
       !player.completed &&
-      // Also, if winner is null, this is really a new round (not just end of previous)
       gameRoomData.winner === null
     ) {
-      // Reset game state and show question screen
       localGameEnded = false;
       playAgainClicked = false;
       renderGameScreen();
@@ -242,17 +236,13 @@ function joinGameRoom(code, playerId, isHost) {
     }
     // --- END PLAY AGAIN FIX LOGIC ---
 
-    // If in lobby, nothing to do.
     if (!gameRoomData.started) return;
 
-    // In game, if finished or completed, show result/waiting screen.
     if (player && (player.finished || player.completed)) {
       tryEndGame();
       renderPersonalResultScreen();
       return;
     }
-
-    // Otherwise, in-game and not finished: show appropriate screen
     renderGameScreen();
     renderBars();
   });
@@ -429,7 +419,6 @@ async function tryEndGame() {
     await updateDoc(doc(db, "climb_games", gameCode), patch);
   }
   if (gameRoomData.winner) {
-    // Mark all unfinished as finished with their scores at this moment
     let patch = {};
     let nowMillis = Date.now();
     leaderboardOrder.forEach(pid => {
