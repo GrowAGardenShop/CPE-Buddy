@@ -219,12 +219,42 @@ function joinGameRoom(code, playerId, isHost) {
     leaderboardOrder = gameRoomData.leaderboardOrder || Object.keys(gameRoomData.leaderboard || {});
     renderRoomPlayers(gameRoomData.players || {});
     renderLeaderboardBar();
-    if (gameRoomData.started) {
-      show('gamePlay');
-      if (lobbyChatUnsub) lobbyChatUnsub();
-      startGamePlay();
-      setupChat(gameCode);
+
+    // --- PLAY AGAIN FIX LOGIC ---
+    // If a new round has started, and this player is not finished/completed, go to game
+    const player = gameRoomData.players[localPlayerId];
+    if (
+      gameRoomData.started &&
+      (gameRoomData.playAgain || []).length === 0 &&
+      player &&
+      !player.finished &&
+      !player.completed &&
+      // Also, if winner is null, this is really a new round (not just end of previous)
+      gameRoomData.winner === null
+    ) {
+      // Reset game state and show question screen
+      localGameEnded = false;
+      playAgainClicked = false;
+      renderGameScreen();
+      renderBars();
+      setupGlobalTimer();
+      return;
     }
+    // --- END PLAY AGAIN FIX LOGIC ---
+
+    // If in lobby, nothing to do.
+    if (!gameRoomData.started) return;
+
+    // In game, if finished or completed, show result/waiting screen.
+    if (player && (player.finished || player.completed)) {
+      tryEndGame();
+      renderPersonalResultScreen();
+      return;
+    }
+
+    // Otherwise, in-game and not finished: show appropriate screen
+    renderGameScreen();
+    renderBars();
   });
 }
 function renderRoomPlayers(players) {
