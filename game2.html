@@ -33,11 +33,13 @@
     let serverEndTime = 0;
     let localGameEnded = false;
     let playAgainClicked = false;
-    let lastBarSnapshot = {};
     let kickedFlag = false;
     let joinLock = false;
     let leaderboardOrder = [];
-    let lastGameStartTS = 0; // for timer sync
+    let finishTimes = {}; // {pid: {score, timeMillis, name}}
+    let finishOrder = []; // [{pid, score, timeMillis, name}]
+    let myFinishTime = null;
+    let myFinishPlace = null;
 
     // --- Utility ---
     function randomCode() {
@@ -107,20 +109,20 @@
       });
       questions = chooseQuestions(questions, 30);
       // Set end time as server timestamp + 5 min
-      serverEndTime = Date.now() + 5*60*1000;
-      lastGameStartTS = serverEndTime - 5*60*1000;
-      leaderboardOrder = [localPlayerId];
+      const now = Date.now();
+      let leaderboardOrderInit = [localPlayerId];
       await setDoc(doc(db, "climb_games", gameCode), {
         code: gameCode,
         host: localPlayerId,
         started: false,
         questions,
         barMax,
-        endTime: serverEndTime,
+        endTime: now + 5*60*1000,
         winner: null,
         playAgain: [],
         leaderboard: { [localPlayerId]: 0 },
-        leaderboardOrder: leaderboardOrder,
+        leaderboardOrder: leaderboardOrderInit,
+        finishedPlayers: [],
         players: {
           [localPlayerId]: {
             name: playerName,
@@ -128,10 +130,12 @@
             wrongStreak: 0,
             mpQIndex: 0,
             finished: false,
-            completed: false
+            completed: false,
+            finishMillis: null,
+            score: 0
           }
         },
-        lastGameStartTS
+        lastGameStartTS: now
       });
       joinGameRoom(gameCode, localPlayerId, true);
     };
@@ -162,7 +166,7 @@
           document.getElementById('mpError').innerText = "Game already started!";
           joinLock = false; return;
         }
-        if (data.players && Object.keys(data.players).length >= 6) {
+        if (data.players && Object.keys(data.players).length >= 5) {
           document.getElementById('mpError').innerText = "Room is full!";
           joinLock = false; return;
         }
@@ -184,7 +188,9 @@
             wrongStreak: 0,
             mpQIndex: 0,
             finished: false,
-            completed: false
+            completed: false,
+            finishMillis: null,
+            score: 0
           },
           leaderboard: leaderboardPatch,
           leaderboardOrder: leaderboardOrderPatch
@@ -215,15 +221,7 @@
           return;
         }
         gameRoomData = snap.data();
-        // Stable leaderboard order
         leaderboardOrder = gameRoomData.leaderboardOrder || Object.keys(gameRoomData.leaderboard || {});
-        // Kicked check
-        if (!gameRoomData.players[localPlayerId] && !kickedFlag && !gameRoomData.started) {
-          kickedFlag = true;
-          alert("You have been kicked from the room.");
-          show('mainMenu');
-          return;
-        }
         renderRoomPlayers(gameRoomData.players || {});
         renderLeaderboardBar();
         if (gameRoomData.started) {
@@ -281,7 +279,8 @@
       await updateDoc(roomRef, {
         started: true,
         endTime: newEnd,
-        lastGameStartTS: Date.now()
+        lastGameStartTS: Date.now(),
+        finishedPlayers: []
       });
     };
 
@@ -301,13 +300,15 @@
 
     // --- GAMEPLAY ---
     function startGamePlay() {
-      // Use host's serverEndTime for timer
       serverEndTime = gameRoomData.endTime || (Date.now() + 5 * 60 * 1000);
       localGameEnded = false;
       playAgainClicked = false;
-      lastBarSnapshot = {};
-      renderLeaderboardBar();
+      finishTimes = {};
+      finishOrder = [];
+      myFinishTime = null;
+      myFinishPlace = null;
       setupGlobalTimer();
+      renderLeaderboardBar();
       renderBars();
       renderGameScreen();
     }
@@ -326,23 +327,13 @@
       document.getElementById('globalTimer').innerText = `${min}:${s}`;
       if (secs <= 0 && !localGameEnded) {
         localGameEnded = true;
-        showResults("Time's up! Here are the scores:");
+        tryEndGame();
       }
     }
 
-    // --- BAR DRAW (only refresh if bar actually changes, leaderboard order stable) ---
+    // --- BAR DRAW (leaderboard order stable) ---
     function renderBars() {
       const players = gameRoomData.players;
-      let barVals = {};
-      Object.entries(players).forEach(([pid, p]) => {
-        barVals[pid] = p.bar || 0;
-      });
-      let changed = false;
-      for (let pid in barVals) {
-        if (lastBarSnapshot[pid] !== barVals[pid]) { changed = true; break; }
-      }
-      if (!changed) return;
-      lastBarSnapshot = {...barVals};
       let barsHtml = "";
       leaderboardOrder.forEach(pid => {
         const p = players[pid];
@@ -364,14 +355,17 @@
     // --- GAME CENTER / QUESTIONS ---
     function renderGameScreen() {
       const player = gameRoomData.players[localPlayerId];
+      // If player finished or completed, show own result screen
       if (player.completed || player.finished) {
-        renderCompletedScreen();
+        tryEndGame();
+        renderPersonalResultScreen();
         return;
       }
       let mpQIndex = player.mpQIndex || 0;
       let q = gameRoomData.questions[mpQIndex];
       if (!q) {
-        showResults();
+        tryEndGame();
+        renderPersonalResultScreen();
         return;
       }
       let questionHtml = `
@@ -389,45 +383,117 @@
       document.getElementById('gameCenter').innerHTML = questionHtml;
     }
 
-    function renderCompletedScreen() {
+    // --- At finish, record time, update finishOrder ---
+    async function tryEndGame() {
+      // If there is already a winner or finishedPlayers array is full, just show placements
+      let finishedPlayers = gameRoomData.finishedPlayers || [];
+      let allPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]);
+      // If already set, don't double-end
+      if (gameRoomData.winner || finishedPlayers.length === allPlayers.length) {
+        renderPlacementScreen();
+        return;
+      }
+      // If you are the one finishing, record time and score
+      const player = gameRoomData.players[localPlayerId];
+      let playerFinished = player.completed || player.finished;
+      if (playerFinished && !player.finishMillis) {
+        const finishMillis = Date.now();
+        let patch = {};
+        patch[`players.${localPlayerId}.finishMillis`] = finishMillis;
+        patch[`players.${localPlayerId}.score`] = player.bar || 0;
+        // Push to finishedPlayers array
+        finishedPlayers = finishedPlayers.slice();
+        finishedPlayers.push({
+          pid: localPlayerId,
+          name: player.name,
+          score: player.bar || 0,
+          finishMillis
+        });
+        patch["finishedPlayers"] = finishedPlayers;
+        // If this is the first finish, set winner
+        if (!gameRoomData.winner && player.completed) patch.winner = player.name;
+        await updateDoc(doc(db, "climb_games", gameCode), patch);
+      }
+      // If someone finished by reaching the flag, end the game for everyone
+      if (gameRoomData.winner) {
+        // Mark all unfinished as finished with their scores at this moment
+        let patch = {};
+        let nowMillis = Date.now();
+        leaderboardOrder.forEach(pid => {
+          const p = gameRoomData.players[pid];
+          if (p && !(p.completed || p.finished)) {
+            patch[`players.${pid}.finished`] = true;
+            patch[`players.${pid}.finishMillis`] = nowMillis;
+            patch[`players.${pid}.score`] = p.bar || 0;
+            finishedPlayers.push({
+              pid: pid,
+              name: p.name,
+              score: p.bar || 0,
+              finishMillis: nowMillis
+            });
+          }
+        });
+        patch["finishedPlayers"] = finishedPlayers;
+        await updateDoc(doc(db, "climb_games", gameCode), patch);
+      }
+      renderPlacementScreen();
+    }
+
+    // --- Show personal result (while waiting others or after forced finish) ---
+    function renderPersonalResultScreen() {
+      const player = gameRoomData.players[localPlayerId];
+      if (!player.finishMillis) {
+        document.getElementById('gameCenter').innerHTML = `
+          <div style="font-size:2em;color:#FFD700;margin-bottom:20px;">🎉 You finished!</div>
+          <div>Waiting for others to finish...</div>
+        `;
+        return;
+      }
+      // Place and score display
+      let finishedPlayers = (gameRoomData.finishedPlayers || []).slice();
+      finishedPlayers.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.finishMillis - b.finishMillis;
+      });
+      let myPlace = finishedPlayers.findIndex(e => e.pid === localPlayerId) + 1;
+      let myTime = Math.max(0, Math.floor((player.finishMillis - (gameRoomData.lastGameStartTS||0))/1000));
+      let mm = String(Math.floor(myTime/60)).padStart(1, "0");
+      let ss = String(myTime%60).padStart(2, "0");
       document.getElementById('gameCenter').innerHTML = `
         <div style="font-size:2em;color:#FFD700;margin-bottom:20px;">🎉 You finished!</div>
-        <div>Waiting for others to finish...</div>
+        <div>Your place: <b>${myPlace}</b> <br>Score: <b>${player.bar || 0}</b> <br>Time: <b>${mm}:${ss}</b></div>
+        <div style="margin-top:20px;">Waiting for others to finish...</div>
       `;
     }
 
-    function showResults(msg = "Game Over!") {
-      clearInterval(timerInterval);
-      localGameEnded = true;
-      renderLeaderboardBar();
-      // Winner is by bar or set
-      let winnerId = null;
-      if (gameRoomData.winner) {
-        let nameToId = Object.entries(gameRoomData.players).find(([pid, p]) => p.name === gameRoomData.winner);
-        if (nameToId) winnerId = nameToId[0];
-      } else {
-        let arr = leaderboardOrder
-          .map(pid => [pid, gameRoomData.players[pid]])
-          .filter(([pid,p]) => p)
-          .sort((a, b) => (b[1].bar||0)-(a[1].bar||0));
-        winnerId = arr.length ? arr[0][0] : null;
-      }
-      let players = gameRoomData.players;
+    // --- Show placements for all when game is over ---
+    function renderPlacementScreen() {
+      let finishedPlayers = (gameRoomData.finishedPlayers || []).slice();
+      let allPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]);
+      // Sort finishedPlayers
+      finishedPlayers.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.finishMillis - b.finishMillis;
+      });
+      // For each place, show name: time (score)
       let html = `<div class="flag-trophy"></div>
-        <h2>${msg}</h2>
-        ${winnerId ? `<div style="color:#FFD700;font-size:1.3em;font-weight:bold;">Winner: ${players[winnerId].name}</div>` : ""}
-        <div class="leaderboard">${renderLeaderboard(players)}</div>
-        <div id="playAgainZone"></div>`;
+        <h2>Results</h2>
+        <div class="leaderboard">`;
+      for (let i=0;i<allPlayers.length;i++) {
+        if (finishedPlayers[i]) {
+          let tp = finishedPlayers[i];
+          let timeSec = Math.max(0, Math.floor((tp.finishMillis-(gameRoomData.lastGameStartTS||0))/1000));
+          let mm = String(Math.floor(timeSec/60)).padStart(1,"0");
+          let ss = String(timeSec%60).padStart(2,"0");
+          html += `<div>${i+1}. <b>${tp.name}</b> &nbsp; <span style="color:#FFD700;">${mm}:${ss}</span> &nbsp; <span style="color:#3B82F6;">Score: ${tp.score}</span></div>`;
+        } else {
+          html += `<div>${i+1}. ???</div>`;
+        }
+      }
+      html += `</div>
+        <div id="playAgainZone" style="margin-top:18px;"></div>`;
       document.getElementById('gameCenter').innerHTML = html;
-      setupPlayAgainButton(winnerId);
-    }
-
-    function renderLeaderboard(players) {
-      return leaderboardOrder
-        .map(pid => players[pid])
-        .filter(p => p)
-        .map(p => `<div>${p.name}: <b>${p.bar} / ${barMax}</b></div>`)
-        .join('');
+      setupPlayAgainButton(finishedPlayers.length ? finishedPlayers[0].pid : null);
     }
 
     function renderLeaderboardBar() {
@@ -443,9 +509,8 @@
     }
 
     // --- PLAY AGAIN LOGIC ---
-    function setupPlayAgainButton(winnerId) {
+    function setupPlayAgainButton(winnerPid) {
       let playAgainArr = gameRoomData.playAgain || [];
-      // Only current players
       let totalPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]).length;
       let alreadyClicked = playAgainArr.includes(localPlayerId);
       let btnText = alreadyClicked ? `Waiting (${playAgainArr.length}/${totalPlayers})` : `Play Again (${playAgainArr.length}/${totalPlayers})`;
@@ -455,7 +520,7 @@
       `;
       document.getElementById('playAgainZone').innerHTML = btnHtml;
       if (playAgainArr.length === totalPlayers && totalPlayers > 0) {
-        setTimeout(() => restartGame(winnerId), 900);
+        setTimeout(() => restartGame(winnerPid), 900);
       }
     }
 
@@ -470,10 +535,10 @@
     };
 
     // --- GAME RESTART, RESET STUFF, NEW QUESTIONS ---
-    async function restartGame(winnerId) {
+    async function restartGame(winnerPid) {
       if (localPlayerId !== gameRoomData.host) return;
       let leaderboardObj = {...(gameRoomData.leaderboard || {})};
-      if (winnerId) leaderboardObj[winnerId] = (leaderboardObj[winnerId] || 0) + 1;
+      if (winnerPid) leaderboardObj[winnerPid] = (leaderboardObj[winnerPid] || 0) + 1;
       const colRef = collection(db, "computersystem_questions");
       const snapshot = await getDocs(colRef);
       let questions = [];
@@ -493,6 +558,8 @@
             mpQIndex: 0,
             finished: false,
             completed: false,
+            finishMillis: null,
+            score: 0,
             ready: false
           };
         }
@@ -506,7 +573,8 @@
         lastGameStartTS: Date.now(),
         winner: null,
         leaderboard: leaderboardObj,
-        players: playersPatch
+        players: playersPatch,
+        finishedPlayers: []
       });
     }
 
@@ -539,7 +607,6 @@
       if (newBar >= barMax) {
         completed = true;
         updates[`players.${localPlayerId}.completed`] = true;
-        updates["winner"] = player.name;
       }
       // If no more questions, finished (cannot answer more)
       if (nextQIndex >= gameRoomData.questions.length) {
@@ -550,11 +617,10 @@
       updates[`players.${localPlayerId}.wrongStreak`] = newWrongStreak;
       updates[`players.${localPlayerId}.mpQIndex`] = nextQIndex;
       await updateDoc(roomRef, updates);
-      if (correct) renderBars();
       setTimeout(() => {
-        // If completed, show completed screen. Otherwise, next question.
         if (completed) {
-          renderCompletedScreen();
+          tryEndGame();
+          renderPersonalResultScreen();
         } else {
           gameRoomData.players[localPlayerId].bar = newBar;
           gameRoomData.players[localPlayerId].wrongStreak = newWrongStreak;
@@ -564,7 +630,7 @@
       }, 150);
     };
 
-    // --- Live Chat (Firestore) ---
+    // --- Live Chat ---
     function setupChat(code) {
       const chatZone = document.getElementById('chatDisplay');
       chatZone.innerHTML = "";
