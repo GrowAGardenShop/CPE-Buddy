@@ -1,5 +1,4 @@
-// Climb The Hill - Multiplayer Quiz Game Logic (2024-08-28)
-// Make sure you have updated climb-the-hill.html and climb-the-hill.css as well!
+// Climb The Hill - Multiplayer Quiz Game Logic (2024-08-28) - Enhanced Leaderboard & Module Selection
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
 import { getFirestore, collection, getDocs, doc, setDoc, getDoc, updateDoc, onSnapshot, addDoc, query, orderBy, deleteField } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
@@ -37,6 +36,7 @@ let finishTimes = {};
 let finishOrder = [];
 let myFinishTime = null;
 let myFinishPlace = null;
+let selectedModule = "computersystem_questions";
 
 // --- Utility ---
 function randomCode() {
@@ -57,6 +57,8 @@ window.show = show;
 window.gotoMultiplayer = function() {
   show('multiLobby');
   document.getElementById('mpError').innerText = "";
+  const sel = document.getElementById('collectionSelect');
+  if (sel) sel.disabled = false;
 };
 window.onload = function() {
   show('mainMenu');
@@ -95,9 +97,14 @@ window.createGameRoom = async function() {
     document.getElementById('mpError').innerText = "Enter your name!";
     return;
   }
+  // Get selected module
+  const sel = document.getElementById('collectionSelect');
+  selectedModule = sel && sel.value ? sel.value : "computersystem_questions";
+  if (sel) sel.disabled = true;
   gameCode = randomCode();
   localPlayerId = randomCode() + Date.now();
-  const colRef = collection(db, "computersystem_questions");
+  // Fetch questions from the selected module/collection
+  const colRef = collection(db, selectedModule);
   const snapshot = await getDocs(colRef);
   let questions = [];
   snapshot.forEach(docSnap => {
@@ -119,6 +126,7 @@ window.createGameRoom = async function() {
     leaderboard: { [localPlayerId]: 0 },
     leaderboardOrder: leaderboardOrderInit,
     finishedPlayers: [],
+    module: selectedModule,
     players: {
       [localPlayerId]: {
         name: playerName,
@@ -129,7 +137,7 @@ window.createGameRoom = async function() {
         completed: false,
         finishMillis: null,
         score: 0,
-        ready: false // Initialize ready state for host
+        ready: false
       }
     },
     lastGameStartTS: now
@@ -137,7 +145,7 @@ window.createGameRoom = async function() {
   joinGameRoom(gameCode, localPlayerId, true);
 };
 
-// --- Join Game Room
+// --- Join Game Room ---
 window.joinGameRoomBtn = async function() {
   if (joinLock) return;
   joinLock = true;
@@ -177,6 +185,10 @@ window.joinGameRoomBtn = async function() {
     leaderboardPatch[localPlayerId] = leaderboardPatch[localPlayerId] || 0;
     let leaderboardOrderPatch = data.leaderboardOrder || [];
     leaderboardOrderPatch.push(localPlayerId);
+
+    // Read module from room data
+    selectedModule = data.module || "computersystem_questions";
+
     await updateDoc(roomRef, {
       [`players.${localPlayerId}`]: {
         name: playerName,
@@ -187,7 +199,7 @@ window.joinGameRoomBtn = async function() {
         completed: false,
         finishMillis: null,
         score: 0,
-        ready: false // Initialize ready state for joining player
+        ready: false
       },
       leaderboard: leaderboardPatch,
       leaderboardOrder: leaderboardOrderPatch
@@ -219,22 +231,43 @@ function joinGameRoom(code, playerId, isHost) {
     }
     gameRoomData = snap.data();
     leaderboardOrder = gameRoomData.leaderboardOrder || Object.keys(gameRoomData.leaderboard || {});
+
+    // Set the currently selected module from DB
+    selectedModule = gameRoomData.module || "computersystem_questions";
     renderRoomPlayers(gameRoomData.players || {});
     renderLeaderboardBar();
 
+    // --- SHOW MODULE IN ROOM MENU ---
+    const moduleMap = {
+      "computersystem_questions": "Computer System",
+      "datandigitial_questions": "Data n Digital",
+      "economics_questions": "Economics",
+      "feedback_questions": "Feedback",
+      "computeraided_questions": "Computer-Aided"
+    };
+    const moduleShow = document.getElementById('roomModuleShow');
+    if (moduleShow) {
+      moduleShow.innerHTML = `<b>Quiz Module:</b> ${moduleMap[selectedModule] || selectedModule}`;
+    }
+
+    // If the game is finished (all players done or winner determined), show placement/results screen
+    if (shouldShowResultsScreen()) {
+      show('gamePlay');
+      renderPlacementScreen();
+      clearInterval(timerInterval);
+      return;
+    }
+
     // Check if the game should be in gameplay or room menu
-    if (gameRoomData.started && !gameRoomData.playAgainStatus) { // Added playAgainStatus check
+    if (gameRoomData.started && !gameRoomData.playAgainStatus) {
       show('gamePlay');
       if (lobbyChatUnsub) lobbyChatUnsub();
       startGamePlay();
       setupChat(gameCode);
     } else {
-      // If the game is not started or in "play again" mode, ensure we are in roomMenu
-      // This is crucial for non-hosts to see the "Ready" button again
       show('roomMenu');
-      if (chatUnsub) chatUnsub(); // Unsubscribe from game chat if back in lobby
-      setupLobbyChat(gameCode); // Ensure lobby chat is active
-      // Update the Ready button state based on the current player's ready status
+      if (chatUnsub) chatUnsub();
+      setupLobbyChat(gameCode);
       const localPlayer = gameRoomData.players[localPlayerId];
       if (localPlayer) {
         document.getElementById('roomReadyBtn').innerText = localPlayer.ready ? "Ready ✔" : "Ready";
@@ -243,12 +276,25 @@ function joinGameRoom(code, playerId, isHost) {
     }
   });
 }
+function shouldShowResultsScreen() {
+  if (!gameRoomData) return false;
+  const finishedPlayers = gameRoomData.finishedPlayers || [];
+  const allPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]);
+  return (
+    gameRoomData.started &&
+    !gameRoomData.playAgainStatus &&
+    (
+      !!gameRoomData.winner ||
+      finishedPlayers.length === allPlayers.length ||
+      (gameRoomData.endTime && Date.now() > gameRoomData.endTime)
+    )
+  );
+}
 function renderRoomPlayers(players) {
   const zone = document.getElementById('roomPlayers');
   if (!players || Object.keys(players).length === 0) {
     zone.innerHTML = "<i>No players yet.</i>";
     document.getElementById('roomStartBtn').disabled = true;
-    // Also disable ready button if no players, though it shouldn't happen for the local player
     document.getElementById('roomReadyBtn').disabled = true;
     return;
   }
@@ -276,7 +322,7 @@ function renderRoomPlayers(players) {
     document.getElementById('roomStartBtn').style.display = 'block';
     document.getElementById('roomStartBtn').disabled = readyCount < 2;
   } else {
-    document.getElementById('roomStartBtn').style.display = 'none'; // Hide start button for non-hosts
+    document.getElementById('roomStartBtn').style.display = 'none';
   }
 }
 window.kickPlayer = async function(pid) {
@@ -290,7 +336,6 @@ window.kickPlayer = async function(pid) {
 };
 window.setReady = async function() {
   const roomRef = doc(db, "climb_games", gameCode);
-  // Toggle ready state
   const currentReadyState = gameRoomData.players[localPlayerId]?.ready || false;
   await updateDoc(roomRef, {
     [`players.${localPlayerId}.ready`]: !currentReadyState
@@ -304,13 +349,13 @@ window.startGameRoom = async function() {
     endTime: newEnd,
     lastGameStartTS: Date.now(),
     finishedPlayers: [],
-    playAgainStatus: false // Reset this flag when starting a new game
+    playAgainStatus: false
   });
 };
 window.leaveRoom = function() {
   if (gameRoomUnsub) gameRoomUnsub();
   if (lobbyChatUnsub) lobbyChatUnsub();
-  if (chatUnsub) chatUnsub(); // Also unsubscribe game chat
+  if (chatUnsub) chatUnsub();
   if (gameCode && localPlayerId) {
     const roomRef = doc(db, "climb_games", gameCode);
     let patch = {};
@@ -379,7 +424,6 @@ function renderBars() {
 // --- GAME CENTER / QUESTIONS ---
 function renderGameScreen() {
   const player = gameRoomData.players[localPlayerId];
-  // Check if all questions are finished for the player, or if the player has explicitly finished
   if (player.completed || player.finished || player.mpQIndex >= gameRoomData.questions.length) {
     tryEndGame();
     renderPersonalResultScreen();
@@ -388,7 +432,6 @@ function renderGameScreen() {
   let mpQIndex = player.mpQIndex || 0;
   let q = gameRoomData.questions[mpQIndex];
   if (!q) {
-    // This case should ideally be covered by the check above, but as a safeguard
     tryEndGame();
     renderPersonalResultScreen();
     return;
@@ -410,21 +453,38 @@ function renderGameScreen() {
 
 // --- At finish, record time, update finishOrder ---
 async function tryEndGame() {
-  // Only update finish status if it hasn't been done yet for this player
   const player = gameRoomData.players[localPlayerId];
   let finishedPlayers = gameRoomData.finishedPlayers || [];
   let allPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]);
 
-  // If the player has completed or finished and their finishMillis isn't set yet
-  if ((player.completed || player.finished) && !player.finishMillis) {
+  // 1. If a player reaches barMax (20), they win immediately, mark winner and everyone as finished
+  if (player.bar >= barMax && !gameRoomData.winner) {
+    let patch = {};
+    patch[`players.${localPlayerId}.completed`] = true;
+    patch[`players.${localPlayerId}.finishMillis`] = Date.now();
+    patch[`players.${localPlayerId}.score`] = player.bar;
+    patch["winner"] = player.name;
+    // Mark all others as finished if not already
+    for (let pid of allPlayers) {
+      if (pid !== localPlayerId && !gameRoomData.players[pid].finished && !gameRoomData.players[pid].completed) {
+        patch[`players.${pid}.finished`] = true;
+        patch[`players.${pid}.finishMillis`] = Date.now();
+        patch[`players.${pid}.score`] = gameRoomData.players[pid].bar;
+      }
+    }
+    await updateDoc(doc(db, "climb_games", gameCode), patch);
+    return;
+  }
+
+  // 2. If all questions are finished for this player (but didn't reach barMax)
+  if ((player.completed || player.finished || player.mpQIndex >= gameRoomData.questions.length) && !player.finishMillis) {
     const finishMillis = Date.now();
     let patch = {};
     patch[`players.${localPlayerId}.finishMillis`] = finishMillis;
     patch[`players.${localPlayerId}.score`] = player.bar || 0;
 
-    // Only add to finishedPlayers if not already present
     if (!finishedPlayers.some(fp => fp.pid === localPlayerId)) {
-      finishedPlayers = finishedPlayers.slice(); // Create a new array
+      finishedPlayers = finishedPlayers.slice();
       finishedPlayers.push({
         pid: localPlayerId,
         name: player.name,
@@ -433,26 +493,21 @@ async function tryEndGame() {
       });
       patch["finishedPlayers"] = finishedPlayers;
     }
-
-    if (!gameRoomData.winner && player.completed) {
-      patch.winner = player.name;
-    }
     await updateDoc(doc(db, "climb_games", gameCode), patch);
   }
 
-  // If a winner is declared or all players have finished (by score or by time)
-  if (gameRoomData.winner || finishedPlayers.length === allPlayers.length) {
-    // This part should be handled by the onSnapshot listener to update the display
-    // after the finishedPlayers array is fully populated in the database.
-    // For now, ensure renderPlacementScreen is called, but the main update will come from Firebase.
-    renderPlacementScreen();
-    clearInterval(timerInterval); // Stop the timer when game officially ends
-    return;
-  }
-
-  // If the local player has just finished but not all players are done, show personal result
-  if (player.completed || player.finished) {
-    renderPersonalResultScreen();
+  // 3. If time runs out, ensure all players are marked finished and scores are set for non-finishers
+  if (gameRoomData.endTime && Date.now() > gameRoomData.endTime) {
+    let patch = {};
+    for (let pid of allPlayers) {
+      let p = gameRoomData.players[pid];
+      if (!p.finishMillis) {
+        patch[`players.${pid}.finished`] = true;
+        patch[`players.${pid}.finishMillis`] = Date.now();
+        patch[`players.${pid}.score`] = p.bar || 0;
+      }
+    }
+    await updateDoc(doc(db, "climb_games", gameCode), patch);
   }
 }
 
@@ -462,7 +517,7 @@ function renderPersonalResultScreen() {
   if (!player.finishMillis) {
     document.getElementById('gameCenter').innerHTML = `
       <div style="font-size:2em;color:#FFD700;margin-bottom:20px;">🎉 You finished!</div>
-      <div>Waiting for others to finish...</div>
+      <div>Please wait for the players to finish...</div>
     `;
     return;
   }
@@ -478,7 +533,7 @@ function renderPersonalResultScreen() {
   document.getElementById('gameCenter').innerHTML = `
     <div style="font-size:2em;color:#FFD700;margin-bottom:20px;">🎉 You finished!</div>
     <div>Your place: <b>${myPlace}</b> <br>Score: <b>${player.bar || 0}</b> <br>Time: <b>${mm}:${ss}</b></div>
-    <div style="margin-top:20px;">Waiting for others to finish...</div>
+    <div style="margin-top:20px;">Please wait for the players to finish...</div>
   `;
 }
 
@@ -486,35 +541,56 @@ function renderPersonalResultScreen() {
 function renderPlacementScreen() {
   let finishedPlayers = (gameRoomData.finishedPlayers || []).slice();
   let allPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]);
+  for (let pid of allPlayers) {
+    if (!finishedPlayers.some(fp => fp.pid === pid)) {
+      let p = gameRoomData.players[pid];
+      finishedPlayers.push({
+        pid,
+        name: p.name,
+        score: p.bar || 0,
+        finishMillis: p.finishMillis || Date.now()
+      });
+    }
+  }
   finishedPlayers.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score;
     return a.finishMillis - b.finishMillis;
   });
+  let winner = finishedPlayers.length > 0 ? finishedPlayers[0] : null;
+  let isHost = (localPlayerId === gameRoomData.host);
+
   let html = `<div class="flag-trophy"></div>
-    <h2>Results</h2>
+    <h2 style="color:#FFD700;text-align:center;">Results</h2>
     <div class="leaderboard">`;
-  for (let i=0;i<allPlayers.length;i++) {
-    if (finishedPlayers[i]) {
-      let tp = finishedPlayers[i];
-      let timeSec = Math.max(0, Math.floor((tp.finishMillis-(gameRoomData.lastGameStartTS||0))/1000));
-      let mm = String(Math.floor(timeSec/60)).padStart(1,"0");
-      let ss = String(timeSec%60).padStart(2,"0");
-      html += `<div>${i+1}. <b>${tp.name}</b> &nbsp; <span style="color:#FFD700;">${mm}:${ss}</span> &nbsp; <span style="color:#3B82F6;">Score: ${tp.score}</span></div>`;
-    } else {
-      // Display players who didn't finish explicitly but are part of the game
-      const playerWhoDidNotFinish = allPlayers.find(pid => !finishedPlayers.some(fp => fp.pid === pid));
-      if (playerWhoDidNotFinish) {
-        const pnf = gameRoomData.players[playerWhoDidNotFinish];
-        html += `<div>${i+1}. <b>${pnf.name}</b> &nbsp; <span style="color:#666;">Did not finish</span> &nbsp; <span style="color:#3B82F6;">Score: ${pnf.bar || 0}</span></div>`;
-      } else {
-        html += `<div>${i+1}. ???</div>`; // Fallback if somehow there's a missing player
-      }
-    }
+  for (let i=0;i<finishedPlayers.length;i++) {
+    let tp = finishedPlayers[i];
+    let timeSec = Math.max(0, Math.floor((tp.finishMillis-(gameRoomData.lastGameStartTS||0))/1000));
+    let mm = String(Math.floor(timeSec/60)).padStart(1,"0");
+    let ss = String(timeSec%60).padStart(2,"0");
+    html += `<div${i === 0 ? ' style="font-weight:bold;color:#FFD700;"' : ''}>${i+1}. <b>${tp.name}</b> &nbsp; <span style="color:#FFD700;">${mm}:${ss}</span> &nbsp; <span style="color:#3B82F6;">Score: ${tp.score}</span></div>`;
   }
-  html += `</div>
-    <div id="playAgainZone" style="margin-top:18px;"></div>`;
+  html += `</div>`;
+
+  // Module selector for host
+  if (isHost) {
+    html += `
+      <div id="playAgainModuleSelect" style="margin-top:10px;">
+        <label style="color:#FFD700;font-weight:bold;">Next Quiz Module:</label>
+        <select id="nextModuleSelect">
+          <option value="computersystem_questions">Computer System</option>
+          <option value="datandigitial_questions">Data n Digital</option>
+          <option value="economics_questions">Economics</option>
+          <option value="feedback_questions">Feedback</option>
+          <option value="computeraided_questions">Computer-Aided</option>
+        </select>
+      </div>
+    `;
+  }
+
+  html += `<div id="playAgainZone" style="margin-top:18px;"></div>
+    <div id="playAgainError" style="color:#FFD700;margin-top:8px;"></div>`;
   document.getElementById('gameCenter').innerHTML = html;
-  setupPlayAgainButton(finishedPlayers.length ? finishedPlayers[0].pid : null);
+  setupPlayAgainButton(winner && winner.pid);
 }
 function renderLeaderboardBar() {
   let playerMap = gameRoomData.players;
@@ -530,80 +606,94 @@ function renderLeaderboardBar() {
 
 // --- PLAY AGAIN LOGIC ---
 function setupPlayAgainButton(winnerPid) {
-  let playAgainArr = gameRoomData.playAgain || [];
-  let totalPlayers = leaderboardOrder.filter(pid => gameRoomData.players[pid]).length;
-  let alreadyClicked = playAgainArr.includes(localPlayerId);
-  let btnText = alreadyClicked ? `Waiting (${playAgainArr.length}/${totalPlayers})` : `Play Again (${playAgainArr.length}/${totalPlayers})`;
-  let disableBtn = alreadyClicked;
-  let btnHtml = `
-  <button onclick="window.playAgainClick()" ${disableBtn ? "disabled" : ""}>${btnText}</button>
-  `;
-  document.getElementById('playAgainZone').innerHTML = btnHtml;
-
-  // If all players have clicked "Play Again", and current player is host, then reset for next game
-  if (playAgainArr.length === totalPlayers && totalPlayers > 0 && localPlayerId === gameRoomData.host) {
-    finishAndCommitWinner(winnerPid);
+  // Only the host gets the Play Again button
+  if (localPlayerId === gameRoomData.host) {
+    document.getElementById('playAgainZone').innerHTML = `
+      <button onclick="window.playAgainClick()">Play Again</button>
+    `;
+  } else {
+    document.getElementById('playAgainZone').innerHTML = `<div>Waiting for host to restart the game...</div>`;
   }
+  const errorBox = document.getElementById('playAgainError');
+  if (errorBox) errorBox.innerText = "";
 }
 
 window.playAgainClick = async function() {
-  if (playAgainClicked) return;
-  playAgainClicked = true;
-  const roomRef = doc(db, "climb_games", gameCode);
-  const snap = await getDoc(roomRef);
-  let arr = snap.data().playAgain || [];
-  if (!arr.includes(localPlayerId)) arr.push(localPlayerId);
-  await updateDoc(roomRef, { playAgain: arr });
+  try {
+    await finishAndCommitWinner();
+  } catch (err) {
+    console.error("[PlayAgain] Button error", err);
+    const errorBox = document.getElementById('playAgainError');
+    if (errorBox) errorBox.innerText = `PlayAgain error: ${err.message}`;
+  }
 };
 
-async function finishAndCommitWinner(winnerPid) {
-  // This function is now only called by the host when all players have clicked "Play Again"
-  // It should reset the game state in Firebase to allow a new game to begin.
+async function finishAndCommitWinner() {
+  try {
+    let leaderboardObj = {...(gameRoomData.leaderboard || {})};
+    // Winner id for leaderboard
+    let winnerPid = null;
+    let finishedPlayers = (gameRoomData.finishedPlayers || []).slice();
+    finishedPlayers.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.finishMillis - b.finishMillis;
+    });
+    if (finishedPlayers.length > 0) winnerPid = finishedPlayers[0].pid;
+    if (winnerPid) leaderboardObj[winnerPid] = (leaderboardObj[winnerPid] || 0) + 1;
 
-  let leaderboardObj = {...(gameRoomData.leaderboard || {})};
-  if (winnerPid) leaderboardObj[winnerPid] = (leaderboardObj[winnerPid] || 0) + 1;
-
-  const colRef = collection(db, "computersystem_questions");
-  const snapshot = await getDocs(colRef);
-  let questions = [];
-  snapshot.forEach(docSnap => questions.push(docSnap.data()));
-  questions = chooseQuestions(questions, 30);
-
-  let playersPatch = {};
-  (gameRoomData.leaderboardOrder || Object.keys(gameRoomData.players)).forEach(pid => {
-    let p = gameRoomData.players[pid];
-    if (p) {
-      playersPatch[pid] = {
-        ...p,
-        bar: 0,
-        wrongStreak: 0,
-        mpQIndex: 0,
-        finished: false,
-        completed: false,
-        finishMillis: null,
-        score: 0,
-        ready: false // Players should be set to not ready for the new game
-      };
+    // Determine new module for next round
+    let newModule = gameRoomData.module;
+    if (localPlayerId === gameRoomData.host) {
+      const sel = document.getElementById('nextModuleSelect');
+      if (sel) newModule = sel.value;
     }
-  });
 
-  const newEnd = Date.now() + 5*60*1000;
-  await updateDoc(doc(db, "climb_games", gameCode), {
-    questions,
-    playAgain: [], // Clear playAgain array
-    started: false, // Set to false so everyone goes back to the room menu
-    endTime: newEnd,
-    lastGameStartTS: Date.now(),
-    winner: null,
-    leaderboard: leaderboardObj,
-    players: playersPatch,
-    finishedPlayers: [],
-    playAgainStatus: true // New flag to indicate "play again" cycle is active, game not "started" yet.
-  });
-  // After host updates, the onSnapshot listener will trigger for all clients
-  // and move them to the 'roomMenu' due to 'started: false'.
+    // Use the selected module for new questions
+    const colRef = collection(db, newModule || "computersystem_questions");
+    const snapshot = await getDocs(colRef);
+    let questions = [];
+    snapshot.forEach(docSnap => questions.push(docSnap.data()));
+    questions = chooseQuestions(questions, 30);
+
+    let playersPatch = {};
+    (gameRoomData.leaderboardOrder || Object.keys(gameRoomData.players)).forEach(pid => {
+      let p = gameRoomData.players[pid];
+      if (p) {
+        playersPatch[pid] = {
+          ...p,
+          bar: 0,
+          wrongStreak: 0,
+          mpQIndex: 0,
+          finished: false,
+          completed: false,
+          finishMillis: null,
+          score: 0,
+          ready: false
+        };
+      }
+    });
+
+    const newEnd = Date.now() + 5*60*1000;
+    await updateDoc(doc(db, "climb_games", gameCode), {
+      questions,
+      playAgain: [],
+      started: false,
+      endTime: newEnd,
+      lastGameStartTS: Date.now(),
+      winner: null,
+      leaderboard: leaderboardObj,
+      players: playersPatch,
+      finishedPlayers: [],
+      playAgainStatus: true,
+      module: newModule
+    });
+    console.log("[PlayAgain] Game reset for new round!");
+  } catch (err) {
+    console.error("[PlayAgain] CommitWinner error", err);
+    const errorBox = document.getElementById('playAgainError');
+    if (errorBox) errorBox.innerText = `CommitWinner error: ${err.message}`;
+  }
 }
-
 
 // --- ANSWERING ---
 window.answerMp = async function(idx) {
@@ -614,7 +704,6 @@ window.answerMp = async function(idx) {
   let mpQIndex = player.mpQIndex || 0;
   let q = gameRoomData.questions[mpQIndex];
   if (!q) {
-    // This should not happen if renderGameScreen checks mpQIndex
     console.warn("No question found at index", mpQIndex);
     return;
   }
@@ -638,7 +727,6 @@ window.answerMp = async function(idx) {
     completed = true;
     updates[`players.${localPlayerId}.completed`] = true;
   }
-  // If no more questions, the player has "finished"
   if (nextQIndex >= gameRoomData.questions.length) {
     updates[`players.${localPlayerId}.finished`] = true;
   }
@@ -647,7 +735,6 @@ window.answerMp = async function(idx) {
   updates[`players.${localPlayerId}.mpQIndex`] = nextQIndex;
   await updateDoc(roomRef, updates);
 
-  // Optimistic UI update and game screen re-render for local player
   gameRoomData.players[localPlayerId].bar = newBar;
   gameRoomData.players[localPlayerId].wrongStreak = newWrongStreak;
   gameRoomData.players[localPlayerId].mpQIndex = nextQIndex;
@@ -655,14 +742,12 @@ window.answerMp = async function(idx) {
   gameRoomData.players[localPlayerId].finished = updates[`players.${localPlayerId}.finished`] || player.finished;
 
   setTimeout(() => {
-    // After update to Firebase, tryEndGame will be triggered by onSnapshot for all clients
-    // If completed or finished, render personal result screen.
     if (gameRoomData.players[localPlayerId].completed || gameRoomData.players[localPlayerId].finished) {
         tryEndGame();
     } else {
         renderGameScreen();
     }
-  }, 150); // Small delay for visual feedback before next question
+  }, 120);
 };
 
 // --- Live Chat ---

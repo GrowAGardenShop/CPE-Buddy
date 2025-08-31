@@ -3,13 +3,19 @@
 <head>
   <meta charset="UTF-8">
   <title>Climb The Hill - Multiplayer Quiz</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="stylesheet" href="climb-the-hill.css">
 </head>
 <body>
+  <!-- Animated Background -->
+  <div class="animated-bg"></div>
   <div class="container">
-    <div id="leaderboardBar"></div>
+    <!-- Timer at the very top, above leaderboard -->
+    <div id="globalTimer" class="global-timer-bar-top"></div>
+    <!-- Leaderboard Bar -->
+    <div id="leaderboardBar" class="card leaderboard-card"></div>
     <!-- MAIN MENU -->
-    <div class="page" id="mainMenu" style="flex-direction:column;align-items:center;">
+    <div class="page card mainmenu-card" id="mainMenu">
       <h1>Climb The Hill</h1>
       <button class="menu-btn" onclick="window.gotoMultiplayer()">Start Multiplayer</button>
       <div class="subtitle">
@@ -17,42 +23,66 @@
       </div>
     </div>
     <!-- MULTIPLAYER LOBBY -->
-    <div class="page" id="multiLobby">
-      <h2>Multiplayer Lobby</h2>
-      <input type="text" id="mpName" placeholder="Your name">
-      <button onclick="window.createGameRoom()">Create Game Room</button>
-      <div class="or">OR</div>
-      <input type="text" id="mpCode" placeholder="Enter game code">
-      <button onclick="window.joinGameRoomBtn()">Join Game</button>
+    <div class="page card" id="multiLobby">
+      <div class="multi-lobby-grid">
+        <div class="multi-lobby-col">
+          <h2>Host New Game</h2>
+          <div class="form-group">
+            <label for="collectionSelect">Select Quiz Module:</label>
+            <select id="collectionSelect">
+              <option value="computersystem_questions">Computer System</option>
+              <option value="datandigitial_questions">Data n Digital</option>
+              <option value="economics_questions">Economics</option>
+              <option value="feedback_questions">Feedback</option>
+              <option value="computeraided_questions">Computer-Aided</option>
+            </select>
+          </div>
+          <input type="text" id="mpName" placeholder="Your name">
+          <button onclick="window.createGameRoom()">Create Game Room</button>
+        </div>
+        <div class="multi-lobby-sep">
+          <span class="multi-lobby-or">OR</span>
+        </div>
+        <div class="multi-lobby-col">
+          <h2>Join Game</h2>
+          <label class="join-label" for="mpCode">Game Code:</label>
+          <input type="text" id="mpCode" placeholder="Enter game code">
+          <button onclick="window.joinGameRoomBtn()">Join Game</button>
+          <button onclick="show('mainMenu')" class="secondary-btn">Back</button>
+        </div>
+      </div>
       <div id="mpError"></div>
-      <button onclick="show('mainMenu')">Back</button>
     </div>
     <!-- ROOM MENU -->
-    <div class="page" id="roomMenu">
-      <h2>Room Lobby</h2>
-      <div id="roomCodeShow"></div>
-      <div id="roomHostShow"></div>
-      <div id="roomPlayers"></div>
-      <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
-      <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
-      <button onclick="window.leaveRoom()">Leave</button>
-      <div class="chat-side" id="lobbyChatSide">
-        <div class="chat-header">Lobby Chat</div>
-        <div id="lobbyChatDisplay"></div>
-        <div class="chat-input-row">
-          <input type="text" id="lobbyChatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendLobbyChatMsg();">
-          <button onclick="window.sendLobbyChatMsg()">Send</button>
+    <div class="page card" id="roomMenu">
+      <div class="room-flex">
+        <div class="room-info">
+          <h2>Room Lobby</h2>
+          <div id="roomCodeShow"></div>
+          <div id="roomHostShow"></div>
+          <div id="roomModuleShow"></div>
+          <div id="roomPlayers"></div>
+          <div class="room-btns">
+            <button id="roomReadyBtn" onclick="window.setReady()">Ready</button>
+            <button id="roomStartBtn" onclick="window.startGameRoom()">Start Game</button>
+            <button onclick="window.leaveRoom()" class="secondary-btn">Leave</button>
+          </div>
+        </div>
+        <div class="chat-side card" id="lobbyChatSide">
+          <div class="chat-header">Lobby Chat</div>
+          <div id="lobbyChatDisplay"></div>
+          <div class="chat-input-row">
+            <input type="text" id="lobbyChatInput" placeholder="Type a message..." onkeydown="if(event.key=='Enter')window.sendLobbyChatMsg();">
+            <button onclick="window.sendLobbyChatMsg()">Send</button>
+          </div>
         </div>
       </div>
     </div>
     <!-- GAMEPLAY -->
-    <div class="page" id="gamePlay">
-      <div class="global-timer-bar">
-        <div id="globalTimer"></div>
-      </div>
-      <div class="bars-side" id="barsZone"></div>
-      <div class="game-center" id="gameCenter"></div>
-      <div class="chat-side" id="chatSide">
+    <div class="page gameplay-flex" id="gamePlay">
+      <div class="bars-side card" id="barsZone"></div>
+      <div class="game-center card" id="gameCenter"></div>
+      <div class="chat-side card" id="chatSide">
         <div class="chat-header">Live Chat</div>
         <div id="chatDisplay"></div>
         <div class="chat-input-row">
